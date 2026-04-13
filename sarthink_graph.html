@@ -1,0 +1,1327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sarthink · Memory Graph</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/papaparse@5/papaparse.min.js"></script>
+
+<!-- Three.js ES module imports -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --gb: rgba(4,4,20,0.82);
+  --gb2: rgba(4,4,24,0.70);
+  --bdr: rgba(255,255,255,0.07);
+  --dim: rgba(255,255,255,0.30);
+  --mid: rgba(255,255,255,0.65);
+  --acc: #4f8eff;
+  --bg: #000010;
+}
+body { background:var(--bg); color:#dde; font-family:'Outfit',sans-serif; overflow:hidden; height:100vh; width:100vw; }
+
+/* Loading */
+#loading {
+  position:fixed; inset:0; background:var(--bg);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  z-index:9999; gap:18px; transition:opacity 0.8s;
+}
+#loading.fade { opacity:0; pointer-events:none; }
+.lb-brand { font-family:'Orbitron',monospace; font-size:1.9rem; font-weight:900; letter-spacing:.32em; color:#fff; }
+.lb-brand em { color:var(--acc); font-style:normal; }
+.lb-track { width:260px; height:2px; background:rgba(255,255,255,0.08); border-radius:1px; }
+.lb-fill  { height:100%; width:0%; background:linear-gradient(90deg,#1DA1F2,#FF4500,#E1306C,#5865F2); border-radius:1px; transition:width .35s; }
+.lb-msg   { font-size:.72rem; color:var(--dim); letter-spacing:.12em; min-height:1em; }
+
+/* Canvas */
+canvas { display:block; }
+
+/* UI layer */
+#ui { position:fixed; inset:0; pointer-events:none; z-index:100; }
+#ui.rec .hideable { opacity:0!important; pointer-events:none!important; transform:translateY(-8px)!important; }
+
+/* Header */
+#hdr {
+  position:absolute; top:0; left:0; right:0; padding:12px 18px;
+  display:flex; align-items:center; justify-content:space-between;
+  background:linear-gradient(to bottom,rgba(0,0,18,.85),transparent);
+  pointer-events:none; transition:opacity .5s,transform .5s;
+}
+.brand { font-family:'Orbitron',monospace; font-size:.82rem; font-weight:900; letter-spacing:.26em; color:rgba(255,255,255,.88); }
+.brand em { color:var(--acc); font-style:normal; }
+#hbtns { display:flex; gap:7px; pointer-events:all; }
+
+/* Buttons */
+.btn {
+  padding:5px 12px; border:1px solid var(--bdr);
+  background:var(--gb); color:var(--mid); border-radius:7px;
+  cursor:pointer; font-family:'Outfit',sans-serif; font-size:.74rem;
+  font-weight:500; letter-spacing:.04em;
+  transition:all .18s; backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px);
+  white-space:nowrap;
+}
+.btn:hover { background:rgba(255,255,255,.09); border-color:rgba(255,255,255,.22); color:#fff; }
+.btn.on    { background:rgba(79,142,255,.18); border-color:var(--acc); color:#90c0ff; }
+.btn.stop  { background:rgba(255,60,60,.14); border-color:rgba(255,80,80,.35); color:#ff9090; }
+
+/* Sidebar */
+#sidebar {
+  position:absolute; top:52px; left:14px; width:224px;
+  background:var(--gb); border:1px solid var(--bdr); border-radius:11px; padding:13px;
+  pointer-events:all; backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+  transition:opacity .5s,transform .5s; max-height:calc(100vh - 90px); overflow-y:auto;
+}
+#sidebar::-webkit-scrollbar{width:3px;}
+#sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px;}
+.plbl { font-size:.6rem; letter-spacing:.22em; color:var(--dim); font-weight:600; margin-bottom:9px; }
+.prow { display:flex; gap:5px; margin-bottom:11px; flex-wrap:wrap; }
+.prow .btn { padding:4px 8px; font-size:.68rem; }
+
+/* Group items */
+.gi { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:7px; cursor:pointer; transition:background .15s; user-select:none; }
+.gi:hover  { background:rgba(255,255,255,.05); }
+.gi.dimmed { opacity:.24; }
+.gi.solo   { background:rgba(255,255,255,.055); }
+.gidot { width:8px; height:8px; border-radius:50%; flex-shrink:0; transition:transform .2s; }
+.gi:hover .gidot { transform:scale(1.5); }
+.gi.solo .gidot  { box-shadow:0 0 7px currentColor; }
+.giname { font-size:.76rem; color:var(--mid); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gicnt  { font-size:.64rem; color:var(--dim); font-variant-numeric:tabular-nums; }
+.divider { height:1px; background:var(--bdr); margin:11px 0; }
+
+/* Search */
+#srch {
+  width:100%; padding:5px 9px;
+  background:rgba(255,255,255,.04); border:1px solid var(--bdr);
+  border-radius:6px; color:#fff; font-size:.74rem; font-family:'Outfit',sans-serif;
+  outline:none; transition:border-color .2s;
+}
+#srch:focus { border-color:var(--acc); }
+#srch::placeholder { color:var(--dim); }
+
+/* Depth slider */
+#depth-wrap {
+  display:flex; align-items:center; gap:8px; margin-top:7px;
+  font-size:.68rem; color:var(--dim);
+}
+#depth-wrap span { white-space:nowrap; }
+#depth-val { color:var(--acc); font-weight:600; min-width:14px; text-align:center; }
+#sdepth { flex:1; accent-color:var(--acc); }
+
+/* Cycle bar */
+#cycbar {
+  position:absolute; bottom:18px; left:50%; transform:translateX(-50%) translateY(10px);
+  background:var(--gb); border:1px solid var(--bdr); border-radius:11px; padding:9px 16px;
+  display:flex; align-items:center; gap:12px; pointer-events:all;
+  backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+  opacity:0; transition:opacity .4s,transform .4s;
+}
+#cycbar.show { opacity:1; transform:translateX(-50%) translateY(0); }
+.spwrap { display:flex; align-items:center; gap:7px; font-size:.7rem; color:var(--dim); }
+#spdr { width:70px; accent-color:var(--acc); }
+#splbl { min-width:24px; text-align:right; color:var(--mid); }
+
+/* Toast */
+#toast {
+  position:absolute; top:56px; right:14px; width:204px;
+  background:var(--gb); border:1px solid var(--bdr); border-radius:10px; padding:12px;
+  backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+  opacity:0; transform:translateX(8px); transition:opacity .3s,transform .3s; pointer-events:none;
+}
+#toast.show { opacity:1; transform:translateX(0); }
+#toast-lbl  { font-size:.82rem; font-weight:600; color:#fff; margin-bottom:4px; word-break:break-all; }
+#toast-meta { font-size:.68rem; color:var(--dim); display:flex; flex-direction:column; gap:3px; }
+.tdot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+
+/* Stats */
+#stats { position:absolute; bottom:16px; right:14px; font-size:.62rem; color:rgba(255,255,255,.16); letter-spacing:.1em; line-height:1.9; text-align:right; transition:opacity .5s; }
+
+/* Record overlay */
+#recov { position:absolute; inset:0; pointer-events:none; opacity:0; transition:opacity .6s; }
+#recov.show { opacity:1; }
+/* Cinematic title overlay */
+#cin-title {
+  position:absolute; bottom:72px; left:0; right:0; text-align:center;
+  pointer-events:none;
+}
+#cin-name {
+  font-family:'Orbitron',monospace; font-size:clamp(1.6rem,4.5vw,3.2rem);
+  font-weight:900; letter-spacing:.14em; color:#fff; text-transform:uppercase;
+  transition:color .6s, text-shadow .6s, opacity .5s;
+  text-shadow:0 0 60px rgba(255,255,255,.3);
+  opacity:0;
+}
+#cin-sub { font-size:.76rem; color:rgba(255,255,255,.45); letter-spacing:.28em; margin-top:7px; opacity:0; transition:opacity .5s; }
+#cin-style-badge {
+  position:absolute; top:18px; left:50%; transform:translateX(-50%);
+  font-family:'Orbitron',monospace; font-size:.55rem; letter-spacing:.28em;
+  color:rgba(255,255,255,.25); text-transform:uppercase; opacity:0; transition:opacity .5s;
+}
+#timertrack { position:absolute; bottom:0; left:0; right:0; height:2px; background:rgba(255,255,255,.05); }
+#timerfill  { height:100%; width:0%; transition:width linear,background .5s; }
+#recstop {
+  position:absolute; top:14px; right:14px; pointer-events:all;
+  background:rgba(255,40,40,.18); border-color:rgba(255,80,80,.4); color:#ff9090;
+}
+
+/* Record modal */
+#rec-modal {
+  position:fixed; inset:0; z-index:500; display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,16,.75); backdrop-filter:blur(12px);
+  opacity:0; pointer-events:none; transition:opacity .3s;
+}
+#rec-modal.show { opacity:1; pointer-events:all; }
+#rec-box {
+  background:rgba(4,4,24,.96); border:1px solid rgba(255,255,255,.1); border-radius:16px;
+  padding:28px 32px; width:380px; max-width:95vw;
+}
+#rec-box h2 {
+  font-family:'Orbitron',monospace; font-size:.9rem; font-weight:900; letter-spacing:.22em;
+  color:#fff; margin-bottom:18px;
+}
+.rec-opt {
+  display:flex; flex-direction:column; gap:8px; margin-bottom:20px;
+}
+.rec-opt label {
+  display:flex; align-items:center; gap:11px; padding:9px 13px;
+  border:1px solid rgba(255,255,255,.08); border-radius:9px; cursor:pointer;
+  transition:background .15s, border-color .15s;
+}
+.rec-opt label:hover { background:rgba(255,255,255,.05); border-color:rgba(255,255,255,.18); }
+.rec-opt input[type=radio] { accent-color:var(--acc); width:14px; height:14px; flex-shrink:0; }
+.rec-opt .ro-title { font-size:.78rem; color:#fff; font-weight:600; }
+.rec-opt .ro-desc  { font-size:.65rem; color:rgba(255,255,255,.38); margin-top:1px; }
+.rec-row { display:flex; gap:10px; justify-content:flex-end; }
+.rec-row .btn { padding:7px 18px; font-size:.78rem; }
+
+
+/* Tooltip */
+#tooltip {
+  position:fixed; background:var(--gb2); border:1px solid var(--bdr); border-radius:7px;
+  padding:7px 10px; font-size:.72rem; color:var(--mid); pointer-events:none;
+  opacity:0; transition:opacity .15s; z-index:200; max-width:220px; word-break:break-all;
+}
+#tooltip.show { opacity:1; }
+</style>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loading">
+  <div class="lb-brand">SARTHINK <em>·</em> MEMORY</div>
+  <div class="lb-track"><div class="lb-fill" id="lbar"></div></div>
+  <div class="lb-msg" id="lmsg">Initializing…</div>
+</div>
+
+<!-- UI -->
+<div id="ui">
+  <!-- Header -->
+  <div id="hdr" class="hideable">
+    <div class="brand">SARTHINK <em>·</em> MEMORY GRAPH</div>
+  </div>
+
+  <!-- Sidebar -->
+  <div id="sidebar" class="hideable">
+    <div class="plbl">GROUPS</div>
+    <div class="prow">
+      <button class="btn" onclick="showAll()">All</button>
+      <button class="btn" onclick="hideAll()">None</button>
+    </div>
+    <div id="group-list"></div>
+    <div class="divider"></div>
+    <div class="plbl">SEARCH</div>
+    <input id="srch" type="text" placeholder="Search nodes…" oninput="onSearch(this.value)">
+    <div id="depth-wrap">
+      <span>Depth</span>
+      <input type="range" id="sdepth" min="1" max="3" value="1" oninput="onDepthChange(this.value)">
+      <span id="depth-val">1</span>
+    </div>
+  </div>
+
+  <!-- Node toast -->
+  <div id="toast" class="hideable">
+    <div id="toast-lbl">—</div>
+    <div id="toast-meta"></div>
+  </div>
+
+  <!-- Stats -->
+  <div id="stats" class="hideable"></div>
+
+  <!-- Hover tooltip -->
+  <div id="tooltip"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const NODES_URL = './processed_data/cosmograph_nodes.csv';
+const EDGES_URL = './processed_data/cosmograph_edges.csv';
+const BG_COLOR  = 0x000010;
+const DIM_RGB   = [0.025, 0.025, 0.07];   // dark background-like color for dimmed nodes
+
+// ─── State ────────────────────────────────────────────────────────────────────
+const S = {
+  nodes: [], meta: {}, nodeById: {},
+  highlight: null,   // null=all visible | Set=only these groups
+  search: '', searchDepth: 1,
+  is3D: true,
+  cycle: false, cycleIdx: 0, cycleGroups: [], cycleMs: 8000, cycleTimer: null,
+  orbit: false, orbitAngle: 0, orbitRAF: null,
+  record: false,
+  targetCamPos: null, targetCamLook: null,
+  dragGroup: null, dragPlatform: null, dragPlane: null, dragIndices: null, dragInitPos: null, dragStartPt: null,
+  isDragging: false, dragStartX: 0, dragStartY: 0,
+  currentSearchIdx: -1, currentSearchSet: null,
+  searchIsolated: false, savedPositions: null,
+  _toastTimer: null, hoveredIdx: -1,
+  // THREE refs
+  renderer: null, scene: null, camera3: null, camera2: null, controls: null,
+  points: null, geo: null, mat: null,
+  posArr: null, colArr: null, sizeArr: null, baseSizeArr: null,
+  allNodeColors: null,  // Float32Array: original RGB for each node
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const lbar = (p, m) => { $('lbar').style.width=p+'%'; $('lmsg').textContent=m; };
+const fmtGroup = g => g.replace(/_/g,' ').toUpperCase();
+
+function hexToRgbNorm(hex) {
+  const n = parseInt(hex.replace('#',''), 16);
+  return [(n>>16&255)/255, (n>>8&255)/255, (n&255)/255];
+}
+
+async function loadCSV(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Cannot fetch ${url} — run:\n  python3 -m http.server 8080\nthen open http://localhost:8080/sarthink_graph.html`);
+  return new Promise((res, rej) => Papa.parse(r.body || '', {
+    download: true, header: true, skipEmptyLines: true,
+    complete: d => res(d.data), error: rej,
+    // Papa can parse a Response stream
+    worker: false,
+  }));
+}
+
+async function loadCSVText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Cannot fetch ${url}`);
+  const txt = await r.text();
+  return new Promise(res => Papa.parse(txt, { header:true, skipEmptyLines:true, complete:d=>res(d.data) }));
+}
+
+// ─── Scene Setup ──────────────────────────────────────────────────────────────
+function initThree() {
+  const W = window.innerWidth, H = window.innerHeight;
+
+  S.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference:'high-performance' });
+  S.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  S.renderer.setSize(W, H);
+  S.renderer.setClearColor(BG_COLOR, 1);
+  document.body.appendChild(S.renderer.domElement);
+
+  S.scene = new THREE.Scene();
+
+  // 3D perspective camera
+  S.camera3 = new THREE.PerspectiveCamera(55, W/H, 1, 200000);
+  S.camera3.position.set(0, 0, 7500);
+
+  // 2D orthographic camera
+  const aspect = W / H;
+  S.camera2 = new THREE.OrthographicCamera(-8000*aspect, 8000*aspect, 8000, -8000, 1, 200000);
+  S.camera2.position.set(0, 0, 10000);
+
+  S.controls = new OrbitControls(S.camera3, S.renderer.domElement);
+  S.controls.enableDamping = true;
+  S.controls.dampingFactor = 0.07;
+  S.controls.minDistance = 100;
+  S.controls.maxDistance = 80000;
+
+  window.addEventListener('resize', onResize);
+  S.renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  S.renderer.domElement.addEventListener('pointermove', onPointerMove);
+  S.renderer.domElement.addEventListener('pointerup', onPointerUp);
+}
+
+function onResize() {
+  const W = window.innerWidth, H = window.innerHeight;
+  S.renderer.setSize(W, H);
+  S.camera3.aspect = W/H;
+  S.camera3.updateProjectionMatrix();
+  const a = W/H;
+  S.camera2.left=-8000*a; S.camera2.right=8000*a;
+  S.camera2.updateProjectionMatrix();
+}
+
+// ─── Point Cloud ──────────────────────────────────────────────────────────────
+function buildPointCloud(nodes) {
+  const N = nodes.length;
+  S.posArr  = new Float32Array(N * 3);
+  S.colArr  = new Float32Array(N * 3);
+  S.sizeArr = new Float32Array(N);
+  S.baseSizeArr = new Float32Array(N);
+  S.allNodeColors = new Float32Array(N * 3);  // unchanging original colors
+
+  for (let i = 0; i < N; i++) {
+    const n = nodes[i];
+    // Positions from pre-computed layout
+    S.posArr[i*3]   = parseFloat(n.layout_x) || 0;
+    S.posArr[i*3+1] = parseFloat(n.layout_y) || 0;
+    S.posArr[i*3+2] = parseFloat(n.layout_z) || 0;
+
+    // Colors
+    const [r,g,b] = hexToRgbNorm(n.color || '#888888');
+    S.allNodeColors[i*3]=r; S.allNodeColors[i*3+1]=g; S.allNodeColors[i*3+2]=b;
+    S.colArr[i*3]=r; S.colArr[i*3+1]=g; S.colArr[i*3+2]=b;
+
+    // Visual size: log scale of activity weight
+    const sz = Math.max(1, Math.log2((parseInt(n.size)||1)+1));
+    S.sizeArr[i] = sz;
+    S.baseSizeArr[i] = sz;
+  }
+
+  S.geo = new THREE.BufferGeometry();
+  S.geo.setAttribute('position', new THREE.BufferAttribute(S.posArr, 3));
+  S.geo.setAttribute('nodeColor', new THREE.BufferAttribute(S.colArr, 3));
+  S.geo.setAttribute('nodeSize',  new THREE.BufferAttribute(S.sizeArr, 1));
+  S.geo.computeBoundingSphere();
+
+        // Glow vertex + fragment shaders
+  S.mat = new THREE.ShaderMaterial({
+    uniforms: {},
+    vertexShader: `
+      attribute vec3 nodeColor;
+      attribute float nodeSize;
+      varying vec3 vColor;
+      void main() {
+        vColor = nodeColor;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float dist = length(mv.xyz);
+        float ps = nodeSize * 22000.0 / dist;
+        gl_PointSize = nodeSize == 0.0 ? 0.0 : clamp(ps, 1.5, 60.0);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        if (length(vColor) < 0.01) discard;
+
+        vec2 uv = gl_PointCoord * 2.0 - 1.0;
+        float r = dot(uv, uv);
+        if (r > 1.0) discard;
+        float glow = exp(-r * 2.0);
+        float disc = (1.0 - sqrt(r)) * 0.5;
+        float a = clamp(glow + disc, 0.0, 1.0);
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,   // no additive blowout — solid coloured clouds
+    vertexColors: false,
+  });
+
+  S.points = new THREE.Points(S.geo, S.mat);
+  S.scene.add(S.points);
+}
+
+// ─── Color update (fast GPU buffer push) ─────────────────────────────────────
+function refreshColors() {
+  const N = S.nodes.length;
+  for (let i = 0; i < N; i++) {
+    const n = S.nodes[i];
+    const matchSearch = !S.search || (S.currentSearchSet && S.currentSearchSet.has(i));
+    // In search isolation: bypass group filter so cross-platform neighbors are always visible
+    const matchGroup  = S.searchIsolated || S.highlight === null || S.highlight.has(n.group);
+    
+    if (matchSearch && matchGroup) {
+      S.colArr[i*3]   = S.allNodeColors[i*3];
+      S.colArr[i*3+1] = S.allNodeColors[i*3+1];
+      S.colArr[i*3+2] = S.allNodeColors[i*3+2];
+      S.sizeArr[i]    = S.baseSizeArr[i];
+    } else {
+      S.colArr[i*3]   = 0;
+      S.colArr[i*3+1] = 0;
+      S.colArr[i*3+2] = 0;
+      S.sizeArr[i]    = 0;
+    }
+  }
+  S.geo.attributes.nodeColor.needsUpdate = true;
+  S.geo.attributes.nodeSize.needsUpdate = true;
+}
+
+// ─── Hover / Click picking ────────────────────────────────────────────────────
+const _mouse = new THREE.Vector2();
+const _ray   = new THREE.Raycaster();
+
+function screenToNDC(ex, ey) {
+  _mouse.set(
+    (ex / window.innerWidth)  *  2 - 1,
+    (ey / window.innerHeight) * -2 + 1
+  );
+}
+
+function pickNode(ex, ey) {
+  screenToNDC(ex, ey);
+  const cam = S.is3D ? S.camera3 : S.camera2;
+  _ray.setFromCamera(_mouse, cam);
+  // Threshold scales with zoom so hovering stays easy at all distances
+  const dist = S.camera3.position.length();
+  _ray.params.Points = { threshold: Math.max(0.5, dist * 0.004) };
+  const hits = _ray.intersectObject(S.points);
+  return hits.length > 0 ? hits[0].index : -1;
+}
+
+function onPointerDown(e) {
+  if (e.button !== 0) return;
+  S.dragStartX = e.clientX; S.dragStartY = e.clientY;
+  S.isDragging = false;
+  
+  // Disable cluster-dragging while in search isolation
+  if (S.searchIsolated) return;
+  
+  const idx = pickNode(e.clientX, e.clientY);
+  if (idx >= 0) {
+    const n = S.nodes[idx];
+    S.dragGroup = n.group;
+    S.dragPlatform = n.group.split('_')[0];
+    S.controls.enabled = false;
+    
+    S.dragIndices = [];
+    for(let i=0; i<S.nodes.length; i++) if (S.nodes[i].group === S.dragGroup) S.dragIndices.push(i);
+    S.dragInitPos = new Float32Array(S.dragIndices.length * 3);
+    for(let k=0; k<S.dragIndices.length; k++) {
+       const i = S.dragIndices[k];
+       S.dragInitPos[k*3]   = S.posArr[i*3];
+       S.dragInitPos[k*3+1] = S.posArr[i*3+1];
+       S.dragInitPos[k*3+2] = S.posArr[i*3+2];
+    }
+    
+    const cam = S.is3D ? S.camera3 : S.camera2;
+    const normal = new THREE.Vector3();
+    cam.getWorldDirection(normal).negate();
+    const hitPt = new THREE.Vector3(S.posArr[idx*3], S.posArr[idx*3+1], S.posArr[idx*3+2]);
+    S.dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, hitPt);
+    
+    screenToNDC(e.clientX, e.clientY);
+    _ray.setFromCamera(_mouse, cam);
+    S.dragStartPt = new THREE.Vector3();
+    _ray.ray.intersectPlane(S.dragPlane, S.dragStartPt);
+  }
+}
+
+function onPointerMove(e) {
+  if (S.dragGroup) {
+    S.isDragging = true;
+    const cam = S.is3D ? S.camera3 : S.camera2;
+    screenToNDC(e.clientX, e.clientY);
+    _ray.setFromCamera(_mouse, cam);
+    const currPt = new THREE.Vector3();
+    if (_ray.ray.intersectPlane(S.dragPlane, currPt)) {
+       const delta = currPt.sub(S.dragStartPt);
+       for(let k=0; k<S.dragIndices.length; k++) {
+         const i = S.dragIndices[k];
+         S.posArr[i*3]   = S.dragInitPos[k*3]   + delta.x;
+         S.posArr[i*3+1] = S.dragInitPos[k*3+1] + delta.y;
+         S.posArr[i*3+2] = S.dragInitPos[k*3+2] + delta.z;
+       }
+       S.geo.attributes.position.needsUpdate = true;
+    }
+    document.body.style.cursor = 'grabbing';
+    return;
+  }
+  
+  const idx = pickNode(e.clientX, e.clientY);
+  document.body.style.cursor = idx >= 0 ? 'grab' : '';
+  const tip = $('tooltip');
+  if (idx >= 0) {
+    const n = S.nodes[idx];
+    const m = S.meta[n.group] || {};
+    const activity = parseInt(n.size) || 1;
+    const isCenter = S.searchIsolated && idx === S.currentSearchIdx;
+    const dot = `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${m.color||'#aaa'};margin-right:4px;vertical-align:middle"></span>`;
+    tip.innerHTML = `<strong>${n.label}</strong><br>${dot}${fmtGroup(n.group)}${isCenter ? ' &nbsp;<span style="opacity:.5;font-size:.7em">[selected]</span>' : ''}<br><span style="opacity:.6">Activity: ${activity.toLocaleString()}</span>`;
+    tip.style.left = (e.clientX + 14) + 'px';
+    tip.style.top  = (e.clientY - 10) + 'px';
+    tip.classList.add('show');
+  } else {
+    tip.classList.remove('show');
+  }
+}
+
+function onPointerUp(e) {
+  if (S.dragGroup) {
+    if (S.isDragging) {
+      for(let k=0; k<S.dragIndices.length; k++) {
+         const i = S.dragIndices[k];
+         S.nodes[i].layout_x = S.posArr[i*3];
+         S.nodes[i].layout_y = S.posArr[i*3+1];
+         S.nodes[i].layout_z = S.posArr[i*3+2];
+      }
+      if (S.highlight && S.highlight.has(S.dragGroup) && S.megaMeta[S.dragPlatform]) {
+         showPlatformRelations(S.dragPlatform);
+      }
+    }
+    S.dragGroup = null;
+    S.controls.enabled = true;
+    document.body.style.cursor = '';
+  }
+  
+  if (Math.abs(e.clientX - S.dragStartX) < 5 && Math.abs(e.clientY - S.dragStartY) < 5) {
+     onMouseClickWrapper(e);
+  }
+}
+
+function onMouseClickWrapper(e) {
+  const idx = pickNode(e.clientX, e.clientY);
+  if (idx < 0) {
+    // Click on empty space — remove relation lines
+    clearRelations(); return;
+  }
+  const n = S.nodes[idx];
+  const m = S.meta[n.group] || {};
+  $('toast-lbl').textContent = n.label;
+  $('toast-meta').innerHTML = `
+    <span><span class="tdot" style="background:${m.color||'#aaa'}"></span>${fmtGroup(n.group)}</span>
+    <span>Activity: ${(parseInt(n.size)||1).toLocaleString()}</span>
+    <span style="font-size:.62rem;color:rgba(255,255,255,.2)">${n.id}</span>`;
+  $('toast').classList.add('show');
+  clearTimeout(S._toastTimer);
+  S._toastTimer = setTimeout(() => $('toast').classList.remove('show'), 5000);
+  showRelations(idx);
+}
+
+function showRelations(nodeIdx) {
+  clearRelations();
+  const n = S.nodes[nodeIdx];
+  const neighbors = S.adj[n.id] || [];
+  if (!neighbors.length) return;
+  const nx = parseFloat(n.layout_x)||0, ny = parseFloat(n.layout_y)||0, nz = parseFloat(n.layout_z)||0;
+  const pos = [];
+  const colors = [];
+  const sourceCol = new THREE.Color(n.color || '#4488ff');
+  neighbors.forEach(nid => {
+    const nb = S.nodeById[nid];
+    if (!nb) return;
+    const targetCol = new THREE.Color(nb.color || '#4488ff');
+    pos.push(nx, ny, nz);
+    colors.push(sourceCol.r, sourceCol.g, sourceCol.b);
+    pos.push(parseFloat(nb.layout_x)||0, parseFloat(nb.layout_y)||0, parseFloat(nb.layout_z)||0);
+    colors.push(targetCol.r, targetCol.g, targetCol.b);
+  });
+  if (!pos.length) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    opacity: 0.85,
+    transparent: true,
+    blending: THREE.AdditiveBlending
+  });
+  S.relLines = new THREE.LineSegments(geo, mat);
+  S.scene.add(S.relLines);
+}
+
+function clearRelations() {
+  if (!S.relLines) return;
+  S.scene.remove(S.relLines);
+  S.relLines.geometry.dispose();
+  S.relLines = null;
+}
+
+function showPlatformRelations(p) {
+  clearRelations();
+  const groups = S.megaMeta[p].groups;
+  const groupNodes = new Set(S.nodes.filter(n => groups.includes(n.group)).map(n => n.id));
+  const pos = [];
+  const colors = [];
+  
+  groupNodes.forEach(nid => {
+    const n = S.nodeById[nid];
+    const neighbors = S.adj[nid] || [];
+    const sourceCol = new THREE.Color(n.color || '#4488ff');
+    const nx = parseFloat(n.layout_x)||0, ny = parseFloat(n.layout_y)||0, nz = parseFloat(n.layout_z)||0;
+
+    neighbors.forEach(targetId => {
+      // Only draw relations within this mega-cluster to prevent 80k line explosion
+      // and only draw source < target to avoid duplicates
+      if (nid >= targetId || !groupNodes.has(targetId)) return;
+      
+      const nb = S.nodeById[targetId];
+      const targetCol = new THREE.Color(nb.color || '#4488ff');
+      pos.push(nx, ny, nz);
+      colors.push(sourceCol.r, sourceCol.g, sourceCol.b);
+      pos.push(parseFloat(nb.layout_x)||0, parseFloat(nb.layout_y)||0, parseFloat(nb.layout_z)||0);
+      colors.push(targetCol.r, targetCol.g, targetCol.b);
+    });
+  });
+
+  if (!pos.length) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    opacity: 0.20, // softer opacity for mega clusters
+    transparent: true,
+    blending: THREE.AdditiveBlending
+  });
+  S.relLines = new THREE.LineSegments(geo, mat);
+  S.scene.add(S.relLines);
+}
+
+// ─── Render loop ──────────────────────────────────────────────────────────────
+function renderLoop() {
+  requestAnimationFrame(renderLoop);
+  if (S.targetCamLook && S.is3D) {
+    S.controls.target.lerp(S.targetCamLook, 0.08);
+    S.camera3.position.lerp(S.targetCamPos, 0.08);
+    if (S.camera3.position.distanceTo(S.targetCamPos) < 15) S.targetCamLook = null;
+  } else if (S.orbit && S.is3D) {
+    // Slow cinematic orbit during recording, normal speed otherwise
+    const speed = (S.record && S._cinOrbitStyle === 'galaxy') ? 0.04 : 0.18;
+    S.orbitAngle += speed * (Math.PI / 180);
+    const r = S.camera3.position.length();
+    S.camera3.position.set(Math.sin(S.orbitAngle)*r, S.camera3.position.y, Math.cos(S.orbitAngle)*r);
+    S.camera3.lookAt(0, 0, 0);
+  }
+  S.controls.update();
+  S.renderer.render(S.scene, S.is3D ? S.camera3 : S.camera2);
+}
+
+// ─── 2D / 3D toggle ──────────────────────────────────────────────────────────
+function toggleDim() {
+  S.is3D = !S.is3D;
+  $('btn-dim').textContent = S.is3D ? '⬡ 2D' : '⬡ 3D';
+  $('btn-orbit').style.display = S.is3D ? '' : 'none';
+  if (!S.is3D) {
+    stopOrbit();
+    // Flatten z in position buffer so 2D is truly flat
+    const N = S.nodes.length;
+    for (let i=0; i<N; i++) S.posArr[i*3+2] = 0;
+    S.geo.attributes.position.needsUpdate = true;
+  } else {
+    // Restore z from pre-computed layout
+    const N = S.nodes.length;
+    for (let i=0; i<N; i++) S.posArr[i*3+2] = parseFloat(S.nodes[i].layout_z)||0;
+    S.geo.attributes.position.needsUpdate = true;
+  }
+  // Switch OrbitControls to correct camera
+  S.controls.object = S.is3D ? S.camera3 : S.camera2;
+  S.controls.update();
+}
+
+// ─── Orbit ────────────────────────────────────────────────────────────────────
+function toggleOrbit() { S.orbit ? stopOrbit() : startOrbit(); }
+function startOrbit()  { S.orbit=true;  $('btn-orbit').classList.add('on'); }
+function stopOrbit()   { S.orbit=false; $('btn-orbit').classList.remove('on'); }
+
+// ─── Group Panel ──────────────────────────────────────────────────────────────
+function buildGroups() {
+  const el = $('group-list'); el.innerHTML='';
+  const sorted = Object.entries(S.megaMeta).sort((a,b)=>b[1].count-a[1].count);
+  sorted.forEach(([name, m]) => {
+    const d = document.createElement('div');
+    d.className='gi'; d.dataset.p=name;
+    d.innerHTML=`<div class="gidot" style="background:${m.color};box-shadow:0 0 4px ${m.color}55"></div>
+<span class="giname">${fmtGroup(name)}</span><span class="gicnt">${m.count.toLocaleString()}</span>`;
+    d.onclick = () => clickGroup(name);
+    el.appendChild(d);
+  });
+}
+
+function clickGroup(p) {
+  if (S.cycle) stopCycle();
+  const groups = S.megaMeta[p].groups;
+  const activeGroups = Array.from(S.highlight || []);
+  const isExact = activeGroups.length === groups.length && activeGroups.every(g => groups.includes(g));
+  
+  if (isExact) {
+    S.highlight = null;
+    clearRelations();
+    S.targetCamLook = null;
+  } else {
+    S.highlight = new Set(groups);
+    showPlatformRelations(p);
+    flyToPlatform(p);
+  }
+  syncGroupUI(); refreshColors();
+}
+function showAll() { S.highlight=null; syncGroupUI(); refreshColors(); S.targetCamLook = null; clearRelations(); }
+function hideAll() { S.highlight=new Set(); syncGroupUI(); refreshColors(); S.targetCamLook = null; clearRelations(); }
+function syncGroupUI() {
+  document.querySelectorAll('.gi').forEach(el=>{
+    const p = el.dataset.p;
+    const groups = S.megaMeta[p].groups;
+    const vis = S.highlight === null || groups.every(g => S.highlight.has(g));
+    el.classList.toggle('dimmed',!vis);
+    el.classList.toggle('solo',!!(S.highlight && groups.length === S.highlight.size && groups.every(g => S.highlight.has(g))));
+  });
+}
+
+// ─── Cycle ────────────────────────────────────────────────────────────────────
+function toggleCycle() { S.cycle ? stopCycle() : startCycle(); }
+function startCycle() {
+  S.cycle=true;
+  S.cycleGroups = Object.entries(S.megaMeta).sort((a,b)=>b[1].count-a[1].count).map(([k])=>k);
+  $('btn-cycle').textContent='⏹ Cycling';
+  $('btn-cycle').classList.add('on');
+  $('cycbar').classList.add('show');
+  buildGdots();
+  showGroup(S.cycleIdx);
+  scheduleTick();
+  if (S.is3D && !S.orbit) startOrbit();
+}
+function stopCycle() {
+  S.cycle=false; clearTimeout(S.cycleTimer);
+  $('btn-cycle').textContent='▶ Cycle'; $('btn-cycle').classList.remove('on');
+  $('cycbar').classList.remove('show');
+  S.highlight=null; syncGroupUI(); refreshColors(); resetFill();
+  S.targetCamLook = null;
+}
+function showGroup(idx) {
+  const p = S.cycleGroups[idx], m = S.megaMeta[p];
+  S.highlight = new Set(m.groups); syncGroupUI(); refreshColors();
+  $('gdname').textContent=fmtGroup(p);
+  $('gdname').style.color=m.color;
+  $('gdname').style.textShadow=`0 0 80px ${m.color}77`;
+  $('gdsub').textContent=`${m.count.toLocaleString()} NODES`;
+  document.querySelectorAll('.gdot').forEach((d,i)=>{
+    d.classList.toggle('active',i===idx);
+    d.style.background=i===idx?m.color:'';
+  });
+  const f=$('timerfill');
+  f.style.transition='none'; f.style.width='0%'; f.style.background=m.color;
+  requestAnimationFrame(()=>{ f.style.transition=`width ${S.cycleMs}ms linear`; f.style.width='100%'; });
+  flyToPlatform(p);
+}
+
+function flyToPlatform(p) {
+  const groups = S.megaMeta[p].groups;
+  const groupNodes = S.nodes.filter(n => groups.includes(n.group));
+  if (!groupNodes.length) return;
+  let bx=0,by=0,bz=0;
+  groupNodes.forEach(n=>{bx+=parseFloat(n.layout_x)||0;by+=parseFloat(n.layout_y)||0;bz+=parseFloat(n.layout_z)||0;});
+  const cnt = groupNodes.length;
+  bx/=cnt; by/=cnt; bz/=cnt;
+  const clusterCenter = new THREE.Vector3(bx, by, S.is3D?bz:0);
+  const clusterR = Math.sqrt(cnt) * 5.5; 
+  const camDist  = Math.max(800, Math.min(5000, clusterR * 2.0));
+  
+  S.targetCamLook = clusterCenter.clone();
+  const dir = S.camera3.position.clone().sub(clusterCenter).normalize();
+  if (dir.lengthSq() < 0.01) dir.set(0,0,1);
+  S.targetCamPos = clusterCenter.clone().add(dir.multiplyScalar(camDist));
+}
+function scheduleTick() {
+  if (!S.cycle) return;
+  S.cycleTimer=setTimeout(()=>{
+    S.cycleIdx=(S.cycleIdx+1)%S.cycleGroups.length;
+    showGroup(S.cycleIdx); scheduleTick();
+  }, S.cycleMs);
+}
+function shift(d) {
+  if (!S.cycle) return;
+  clearTimeout(S.cycleTimer);
+  S.cycleIdx=(S.cycleIdx+d+S.cycleGroups.length)%S.cycleGroups.length;
+  showGroup(S.cycleIdx); scheduleTick();
+}
+function setSpeed(v) {
+  const s=10-parseInt(v); S.cycleMs=s*1000;
+  $('splbl').textContent=s+'s';
+  if (S.cycle){clearTimeout(S.cycleTimer);showGroup(S.cycleIdx);scheduleTick();}
+}
+function buildGdots() {
+  $('gddots').innerHTML='';
+  S.cycleGroups.forEach((_,i)=>{const d=document.createElement('div');d.className='gdot';$('gddots').appendChild(d);});
+}
+function resetFill() { const f=$('timerfill'); f.style.transition='none'; f.style.width='0%'; }
+
+// ─── Record mode ──────────────────────────────────────────────────────────────
+let _mediaRec = null;
+let _recChunks = [];
+let _cinTimer  = null;
+let _cinIdx    = 0;
+let _cinPlatforms = [];
+let _cinT = 0;  // elapsed ms in current segment
+const CIN_MS = 9000; // ms per cluster in fly-through styles
+
+function toggleRecord() {
+  $('rec-modal').classList.add('show');
+}
+function closeRecModal() {
+  $('rec-modal').classList.remove('show');
+}
+
+function startRecord() {
+  closeRecModal();
+  const style = document.querySelector('input[name=recstyle]:checked').value;
+  
+  // Start MediaRecorder on the THREE canvas
+  const canvas = S.renderer.domElement;
+  const stream = canvas.captureStream(60);
+  _mediaRec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9', videoBitsPerSecond: 8_000_000 });
+  _recChunks = [];
+  _mediaRec.ondataavailable = e => { if (e.data.size > 0) _recChunks.push(e.data); };
+  _mediaRec.start(200);
+
+  S.record = true;
+  $('ui').classList.add('rec');
+  $('recov').classList.add('show');
+  $('btn-record').classList.add('on');
+  $('cin-style-badge').textContent = style.replace(/_/g,' ');
+  $('cin-style-badge').style.opacity = '1';
+
+  // Stop any existing cycle
+  if (S.cycle) stopCycle();
+  stopOrbit();
+
+  _cinPlatforms = Object.entries(S.megaMeta).sort((a,b)=>b[1].count-a[1].count).map(([k])=>k);
+  _cinIdx = 0;
+
+  switch(style) {
+    case 'galaxy_orbit':    cinGalaxyOrbit();    break;
+    case 'cluster_flythrough': cinFlyThrough();  break;
+    case 'zoom_reveal':     cinZoomReveal();     break;
+    case 'connection_web':  cinConnectionWeb();  break;
+    case 'dramatic_sweep':  cinDramaticSweep();  break;
+  }
+}
+
+function stopRecord() {
+  if (_cinTimer) { clearTimeout(_cinTimer); clearInterval(_cinTimer); _cinTimer = null; }
+  if (_mediaRec && _mediaRec.state !== 'inactive') {
+    _mediaRec.onstop = () => {
+      const blob = new Blob(_recChunks, { type: 'video/webm' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = `sarthink_${Date.now()}.webm`;
+      a.click(); URL.revokeObjectURL(url);
+    };
+    _mediaRec.stop();
+  }
+  S.record = false;
+  $('ui').classList.remove('rec');
+  $('recov').classList.remove('show');
+  $('btn-record').classList.remove('on');
+  $('cin-name').style.opacity  = '0';
+  $('cin-sub').style.opacity   = '0';
+  S.highlight = null; syncGroupUI(); refreshColors(); clearRelations();
+  S.targetCamLook = null;
+  stopOrbit();
+}
+
+// ─ helpers ─
+function cinTitle(name, sub, color) {
+  const el = $('cin-name'); const se = $('cin-sub');
+  el.style.opacity = '0'; se.style.opacity = '0';
+  setTimeout(() => {
+    el.textContent = name; el.style.color = color || '#fff';
+    el.style.textShadow = `0 0 80px ${color||'#fff'}66`;
+    se.textContent = sub || '';
+    el.style.opacity = '1'; se.style.opacity = '1';
+  }, 300);
+}
+function cinClear() {
+  $('cin-name').style.opacity = '0'; $('cin-sub').style.opacity = '0';
+}
+function cinFill(ms, color) {
+  const f = $('timerfill');
+  f.style.transition='none'; f.style.width='0%'; f.style.background = color||'#fff';
+  requestAnimationFrame(()=>{ f.style.transition=`width ${ms}ms linear`; f.style.width='100%'; });
+}
+
+// ─ compute cluster centroid and adaptive camera distance ─
+function cinClusterInfo(p) {
+  const groups = S.megaMeta[p].groups;
+  const gpNodes = S.nodes.filter(n => groups.includes(n.group));
+  let bx=0,by=0,bz=0;
+  gpNodes.forEach(n=>{bx+=parseFloat(n.layout_x)||0;by+=parseFloat(n.layout_y)||0;bz+=parseFloat(n.layout_z)||0;});
+  const cnt = gpNodes.length;
+  bx/=cnt; by/=cnt; bz/=cnt;
+  const clusterR = Math.sqrt(cnt) * 5.5;
+  return { center: new THREE.Vector3(bx,by,bz), r: clusterR, cnt, m: S.megaMeta[p] };
+}
+function cinFlyTo(center, dist, instant) {
+  S.targetCamLook = center.clone();
+  let dir = S.camera3.position.clone().sub(center).normalize();
+  if (dir.lengthSq() < 0.01) dir.set(0,0,1);
+  S.targetCamPos = center.clone().add(dir.multiplyScalar(dist));
+}
+
+// ─── STYLE 1: Galaxy Orbit — slow rotation, all nodes visible ─────────────────
+function cinGalaxyOrbit() {
+  S.highlight = null; syncGroupUI(); refreshColors(); clearRelations();
+  cinTitle('SARTHINK · MEMORY GRAPH', 'ALL CONNECTIONS', '#4f8eff');
+  // Fly out to see the whole galaxy
+  S.targetCamLook = new THREE.Vector3(0,0,0);
+  S.targetCamPos  = new THREE.Vector3(0,0,14000);
+  // Start slow orbit
+  S.orbit = true;
+  S.controls.autoRotate = false;
+  // Custom slower angle increment
+  S._cinOrbitStyle = 'galaxy';
+}
+
+// ─── STYLE 2: Cluster Fly-Through ─────────────────────────────────────────────
+function cinFlyThrough() {
+  cinFlyThroughStep();
+}
+function cinFlyThroughStep() {
+  if (!S.record) return;
+  const p = _cinPlatforms[_cinIdx];
+  const info = cinClusterInfo(p);
+  S.highlight = new Set(info.m.groups); syncGroupUI(); refreshColors();
+  
+  // Adaptive distance: never too far or too close for cluster size
+  const dist = Math.max(900, Math.min(5500, info.r * 2.2));
+  cinFlyTo(info.center, dist);
+  cinTitle(p.toUpperCase(), `${info.cnt.toLocaleString()} NODES`, info.m.color);
+  cinFill(CIN_MS, info.m.color);
+  
+  _cinTimer = setTimeout(() => {
+    cinClear();
+    _cinIdx = (_cinIdx + 1) % _cinPlatforms.length;
+    if (_cinIdx === 0) {
+      // Loop: pull back to galaxy view briefly
+      S.highlight = null; syncGroupUI(); refreshColors();
+      S.targetCamLook = new THREE.Vector3(0,0,0);
+      S.targetCamPos  = S.camera3.position.clone().normalize().multiplyScalar(14000);
+      _cinTimer = setTimeout(() => cinFlyThroughStep(), 3000);
+    } else {
+      cinFlyThroughStep();
+    }
+  }, CIN_MS);
+}
+
+// ─── STYLE 3: Zoom Reveal — far to tight, then pull back ──────────────────────
+function cinZoomReveal() { cinZoomRevealStep(); }
+function cinZoomRevealStep() {
+  if (!S.record) return;
+  const p = _cinPlatforms[_cinIdx];
+  const info = cinClusterInfo(p);
+  S.highlight = new Set(info.m.groups); syncGroupUI(); refreshColors();
+  
+  // Phase 1: fly to far position first
+  const farDist  = Math.max(5000, info.r * 7);
+  const nearDist = Math.max(600,  info.r * 1.4);
+  cinFlyTo(info.center, farDist);
+  cinTitle(p.toUpperCase(), 'APPROACHING…', info.m.color);
+  
+  // Phase 2: zoom in close
+  _cinTimer = setTimeout(() => {
+    cinFlyTo(info.center, nearDist);
+    cinTitle(p.toUpperCase(), `${info.cnt.toLocaleString()} NODES`, info.m.color);
+    cinFill(CIN_MS * 0.6, info.m.color);
+    
+    // Phase 3: next
+    _cinTimer = setTimeout(() => {
+      cinClear();
+      _cinIdx = (_cinIdx + 1) % _cinPlatforms.length;
+      cinZoomRevealStep();
+    }, CIN_MS * 0.65);
+  }, CIN_MS * 0.35);
+}
+
+// ─── STYLE 4: Connection Web — show glowing relations per cluster ──────────────
+function cinConnectionWeb() { cinConnectionWebStep(); }
+function cinConnectionWebStep() {
+  if (!S.record) return;
+  const p = _cinPlatforms[_cinIdx];
+  const info = cinClusterInfo(p);
+  S.highlight = new Set(info.m.groups); syncGroupUI(); refreshColors();
+  
+  const dist = Math.max(1000, Math.min(5500, info.r * 2.4));
+  cinFlyTo(info.center, dist);
+  
+  // Show connections after camera arrives
+  _cinTimer = setTimeout(() => {
+    showPlatformRelations(p);
+    cinTitle(p.toUpperCase(), `${info.cnt.toLocaleString()} NODES · CONNECTIONS`, info.m.color);
+    cinFill(CIN_MS * 0.7, info.m.color);
+    
+    _cinTimer = setTimeout(() => {
+      clearRelations();
+      cinClear();
+      _cinIdx = (_cinIdx + 1) % _cinPlatforms.length;
+      cinConnectionWebStep();
+    }, CIN_MS * 0.72);
+  }, CIN_MS * 0.28);
+}
+
+// ─── STYLE 5: Dramatic Sweep — arcing camera through full galaxy ───────────────
+let _sweepAngle = 0;
+let _sweepRAF   = null;
+function cinDramaticSweep() {
+  S.highlight = null; syncGroupUI(); refreshColors(); clearRelations();
+  cinTitle('SARTHINK', 'MEMORY GRAPH', '#4f8eff');
+  _sweepAngle = 0;
+  S._cinOrbitStyle = 'sweep';
+  
+  // Sweep through each platform after a delay
+  let delay = 4000;
+  _cinPlatforms.forEach((p, i) => {
+    setTimeout(() => {
+      if (!S.record) return;
+      const info = cinClusterInfo(p);
+      const dist = Math.max(3000, info.r * 4);
+      cinFlyTo(info.center, dist);
+      cinTitle(p.toUpperCase(), `${info.cnt.toLocaleString()} NODES`, info.m.color);
+      cinFill(CIN_MS * 0.9, info.m.color);
+      setTimeout(() => { if (S.record) cinClear(); }, CIN_MS * 0.75);
+    }, delay);
+    delay += CIN_MS;
+  });
+  // Final pull back
+  setTimeout(() => {
+    if (!S.record) return;
+    S.targetCamLook = new THREE.Vector3(0,0,0);
+    S.targetCamPos  = S.camera3.position.clone().normalize().multiplyScalar(16000);
+    cinTitle('SARTHINK · MEMORY', 'END', '#4f8eff');
+  }, delay);
+}
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+function isolateSearchLayout(centerIdx, bfsByDepth) {
+  // bfsByDepth: array of arrays, index = depth level, values = node IDs at that depth
+  const N = S.nodes.length;
+  S.savedPositions = new Float32Array(S.posArr.buffer.slice(0));
+  
+  const OFFSCREEN = 10_000_000;
+  for (let i = 0; i < N; i++) {
+    S.posArr[i*3]   = OFFSCREEN;
+    S.posArr[i*3+1] = OFFSCREEN;
+    S.posArr[i*3+2] = OFFSCREEN;
+  }
+  
+  // Place the primary node at origin
+  S.posArr[centerIdx*3]   = 0;
+  S.posArr[centerIdx*3+1] = 0;
+  S.posArr[centerIdx*3+2] = 0;
+  const cn = S.nodes[centerIdx];
+  cn.layout_x = 0; cn.layout_y = 0; cn.layout_z = 0;
+  
+  // Place each depth ring in expanding shells
+  const BASE_R = 340;
+  bfsByDepth.forEach((ring, depthIdx) => {
+    const R = BASE_R * (depthIdx + 1);
+    const cnt = ring.length;
+    ring.forEach((nid, k) => {
+      const nb = S.nodeById[nid];
+      if (!nb || nb.index === undefined) return;
+      const phi   = Math.acos(-1 + (2 * k) / Math.max(cnt - 1, 1));
+      const theta = Math.sqrt(cnt * Math.PI) * phi;
+      const x = R * Math.sin(phi) * Math.cos(theta);
+      const y = R * Math.sin(phi) * Math.sin(theta);
+      const z = R * Math.cos(phi);
+      S.posArr[nb.index*3]   = x;
+      S.posArr[nb.index*3+1] = y;
+      S.posArr[nb.index*3+2] = z;
+      nb.layout_x = x; nb.layout_y = y; nb.layout_z = z;
+    });
+  });
+  
+  S.geo.attributes.position.needsUpdate = true;
+  S.searchIsolated = true;
+}
+
+function restoreSearchLayout() {
+  if (!S.savedPositions) return;
+  const N = S.nodes.length;
+  for (let i = 0; i < N; i++) {
+    const ox = S.savedPositions[i*3], oy = S.savedPositions[i*3+1], oz = S.savedPositions[i*3+2];
+    S.posArr[i*3]   = ox;
+    S.posArr[i*3+1] = oy;
+    S.posArr[i*3+2] = oz;
+    S.nodes[i].layout_x = ox;
+    S.nodes[i].layout_y = oy;
+    S.nodes[i].layout_z = oz;
+  }
+  S.geo.attributes.position.needsUpdate = true;
+  S.savedPositions = null;
+  S.searchIsolated = false;
+}
+
+function onSearch(v) {
+  const q = v.trim().toLowerCase();
+  S.search = q;
+  
+  // If clearing, restore everything
+  if (!q) {
+    if (S.searchIsolated) restoreSearchLayout();
+    S.currentSearchIdx = -1;
+    S.currentSearchSet = null;
+    clearRelations();
+    S.targetCamLook = null;
+    $('toast').classList.remove('show');
+    refreshColors();
+    return;
+  }
+  
+  runSearch();
+}
+
+function runSearch() {
+  const q = S.search;
+  if (!q) return;
+
+  if (S.searchIsolated) restoreSearchLayout();
+  
+  S.currentSearchIdx = -1;
+  const N = S.nodes.length;
+  for (let i = 0; i < N; i++) {
+    if (S.nodes[i].label.toLowerCase().includes(q)) {
+      S.currentSearchIdx = i;
+      break;
+    }
+  }
+  
+  if (S.currentSearchIdx >= 0) {
+    const n = S.nodes[S.currentSearchIdx];
+    
+    // BFS up to S.searchDepth hops
+    const visited = new Set([n.id]);
+    const bfsByDepth = [];
+    let frontier = [n.id];
+    
+    for (let d = 0; d < S.searchDepth; d++) {
+      const nextFrontier = [];
+      frontier.forEach(nid => {
+        (S.adj[nid] || []).forEach(neighbor => {
+          if (!visited.has(neighbor)) {
+            visited.add(neighbor);
+            nextFrontier.push(neighbor);
+          }
+        });
+      });
+      if (nextFrontier.length) bfsByDepth.push(nextFrontier);
+      frontier = nextFrontier;
+      if (!frontier.length) break;
+    }
+    
+    // Build the visible index set
+    S.currentSearchSet = new Set([S.currentSearchIdx]);
+    bfsByDepth.flat().forEach(nid => {
+      const nb = S.nodeById[nid];
+      if (nb && nb.index !== undefined) S.currentSearchSet.add(nb.index);
+    });
+    
+    // Physical relayout with concentric shells
+    isolateSearchLayout(S.currentSearchIdx, bfsByDepth);
+    
+    // Draw relations from center only (depth-1 neighbors)
+    showRelations(S.currentSearchIdx);
+    
+    const m = S.meta[n.group] || {};
+    const totalVisible = S.currentSearchSet.size;
+    $('toast-lbl').textContent = n.label;
+    $('toast-meta').innerHTML = `
+      <span><span class="tdot" style="background:${m.color||'#aaa'}"></span>${fmtGroup(n.group)}</span>
+      <span>Activity: ${(parseInt(n.size)||1).toLocaleString()}</span>
+      <span style="opacity:.5">${totalVisible - 1} connected nodes · depth ${S.searchDepth}</span>
+      <span style="font-size:.62rem;color:rgba(255,255,255,.2)">${n.id}</span>`;
+    $('toast').classList.add('show');
+    clearTimeout(S._toastTimer);
+    
+    // Camera distance scales with depth
+    const camR = 800 + (S.searchDepth - 1) * 600;
+    S.targetCamLook = new THREE.Vector3(0, 0, 0);
+    let dir = S.camera3.position.clone().normalize();
+    if (dir.lengthSq() < 0.01) dir.set(0, 0, 1);
+    S.targetCamPos = dir.multiplyScalar(camR);
+  } else {
+    S.currentSearchSet = new Set();
+    clearRelations();
+    $('toast').classList.remove('show');
+    S.targetCamLook = null;
+  }
+  refreshColors();
+}
+
+function onDepthChange(v) {
+  S.searchDepth = parseInt(v);
+  $('depth-val').textContent = v;
+  if (S.search) runSearch();
+}
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+function updateStats(nNodes, nEdges) {
+  $('stats').innerHTML=`${nNodes.toLocaleString()} nodes &nbsp;·&nbsp; ${nEdges.toLocaleString()} edges<br>${Object.keys(S.meta).length} groups`;
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+async function boot() {
+  lbar(8, 'Loading nodes…');
+  const rawNodes = await loadCSVText(NODES_URL);
+  lbar(42, 'Loading edges…');
+  const rawEdges = await loadCSVText(EDGES_URL);
+  // Build adjacency map for relation display (needs S.adj initialized first)
+  S.adj = {}; S.relLines = null;
+  rawEdges.forEach(e => {
+    if (!S.adj[e.source]) S.adj[e.source] = [];
+    if (!S.adj[e.target]) S.adj[e.target] = [];
+    S.adj[e.source].push(e.target);
+    S.adj[e.target].push(e.source);
+  });
+  lbar(72, 'Building scene…');
+
+  // Build metadata and node array
+  S.meta = {};
+  S.megaMeta = {};
+  S.nodes = rawNodes.map((n, idx) => {
+    n.index = idx; // required for neighbour lookups
+    if (!S.meta[n.group]) S.meta[n.group]={color:n.color||'#888',count:0};
+    S.meta[n.group].count++;
+    
+    const p = n.group.split('_')[0];
+    if (!S.megaMeta[p]) S.megaMeta[p] = { color: n.color||'#888', count: 0, groups: [] };
+    if (!S.megaMeta[p].groups.includes(n.group)) S.megaMeta[p].groups.push(n.group);
+    S.megaMeta[p].count++;
+
+    S.nodeById[n.id]=n;
+    return n;
+  });
+
+  const hasLayout = rawNodes[0] && rawNodes[0].layout_x !== undefined;
+  if (!hasLayout) throw new Error('Pre-computed layout not found!  Run:\n  python3 parsers/compute_layout.py');
+
+  lbar(82, 'Initializing WebGL…');
+  initThree();
+
+  lbar(90, 'Uploading point cloud…');
+  buildPointCloud(S.nodes);
+
+  buildGroups();
+  updateStats(S.nodes.length, rawEdges.length);
+
+  Object.assign(window, { toggleOrbit, toggleDim, toggleRecord, toggleCycle,
+    showAll, hideAll, onSearch, onDepthChange, shift, setSpeed, clickGroup,
+    startRecord, stopRecord, closeRecModal });
+
+  lbar(100, 'Ready');
+  $('loading').classList.add('fade');
+  setTimeout(()=>{ $('loading').style.display='none'; }, 800);
+
+  renderLoop();
+}
+
+boot().catch(err => {
+  $('lmsg').innerHTML=`<span style="color:#ff6060">${err.message.replace(/\n/g,'<br>')}</span>`;
+  $('lbar').style.background='#ff3333';
+});
+</script>
+</body>
+</html>

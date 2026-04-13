@@ -1,0 +1,32 @@
+# Sarthink Gitignore
+
+# Data & Personal Exports
+archive/*
+processed_data/
+config/identity_map.json
+.env
+
+# Raw Data Traces (Twitter/Reddit Exports)
+*.js
+*.jsonl
+*.csv
+*.db
+*.sqlite
+
+# Cache & Metadata
+context_cache.json
+users.jsonl
+__pycache__/
+*.pyc
+
+# IDEs & System
+.vscode/
+.idea/
+.DS_Store
+.env
+
+context/reddit/Reddit_Context_Archive (Copy)
+context/reddit/Reddit_Context_Archive
+graph-thing.mp4
+context/reddit/addn.py
+context/reddit/test.py

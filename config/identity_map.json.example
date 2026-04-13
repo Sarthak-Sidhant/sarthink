@@ -1,0 +1,22 @@
+{
+  "master_persona": "Your Name (me)",
+  "aliases": {
+    "twitter": [
+      "your_handle",
+      "your_numeric_id"
+    ],
+    "discord": [
+      "your_discord_id",
+      "your_display_name"
+    ],
+    "reddit": [
+      "your_reddit_username"
+    ],
+    "facebook": [
+      "Your Full Name"
+    ],
+    "instagram": [
+      "your_insta_handle"
+    ]
+  }
+}
