@@ -4,17 +4,22 @@ import logging
 import csv
 import ijson
 import gc
+import sys
 from datetime import datetime, timezone
+
+# Resolve paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+
+# Inject utils path for database import
+sys.path.append(os.path.join(REPO_ROOT, "scripts", "utils"))
 from database import SarthinkMemoryLayer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 PLATFORM = "reddit"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(SCRIPT_DIR)
-
-REDDIT_POSTS_DIR = os.path.join(REPO_ROOT, "context", "reddit", "Reddit_Context_Archive", "posts", "*.json")
-REDDIT_COMMENTS_DIR = os.path.join(REPO_ROOT, "context", "reddit", "Reddit_Context_Archive", "comments", "*.json")
+REDDIT_POSTS_DIR = os.path.join(REPO_ROOT, "processed_data", "context", "reddit", "Reddit_Context_Archive", "posts", "*.json")
+REDDIT_COMMENTS_DIR = os.path.join(REPO_ROOT, "processed_data", "context", "reddit", "Reddit_Context_Archive", "comments", "*.json")
 REDDIT_CHAT_CSV = os.path.join(REPO_ROOT, "archive", "reddit-export", "chat_history.csv")
 JSONL_OUTPUT = "reddit_logs.jsonl"
 

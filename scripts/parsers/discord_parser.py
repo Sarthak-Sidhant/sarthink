@@ -2,15 +2,21 @@ import os
 import json
 import glob
 import logging
+import sys
 from datetime import datetime, timezone
+
+# Resolve paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+
+# Inject utils path for database import
+sys.path.append(os.path.join(REPO_ROOT, "scripts", "utils"))
 from database import SarthinkMemoryLayer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 # --- CONFIGURATION ---
 PLATFORM = "discord"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 JSONL_OUTPUT = "discord_logs.jsonl"
 
 def parse_discord_timestamp(dt_str):
@@ -25,8 +31,8 @@ def parse_discord_timestamp(dt_str):
 def process_discord():
     db = SarthinkMemoryLayer()
     
-    # 1. Find all exported JSON files recursively in the archive/discord-export folder
-    search_path = os.path.join(REPO_ROOT, "archive", "discord-export", "**", "*.json")
+    # 1. Find all exported JSON files recursively in the archive/Discord_DM_Export folder
+    search_path = os.path.join(REPO_ROOT, "archive", "Discord_DM_Export", "**", "*.json")
     json_files = glob.glob(search_path, recursive=True)
     
     if not json_files:
@@ -114,9 +120,12 @@ def process_discord():
                 content=content,
                 parent_msg_id=parent_global_id,
                 json_data=flat_json_entry,
-                jsonl_filename=JSONL_OUTPUT
+                jsonl_filename=JSONL_OUTPUT,
+                commit_now=False
             )
             total_messages += 1
+            if total_messages % 1000 == 0:
+                db.commit()
 
     db.close()
     logging.info(f"Successfully processed {len(json_files)} threads and inserted {total_messages} messages for {PLATFORM}.")

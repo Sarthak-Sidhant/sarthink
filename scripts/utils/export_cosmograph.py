@@ -3,9 +3,11 @@ import csv
 import logging
 import json
 import os
+from pathlib import Path
 
+# Resolve paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = Path(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -56,14 +58,14 @@ def get_thread_group(platform, title):
     return f"{platform}_public_thread"
 
 def load_identity_map():
-    map_path = os.path.join(REPO_ROOT, "config", "identity_map.json")
-    if not os.path.exists(map_path):
+    map_path = REPO_ROOT / "config" / "identity_map.json"
+    if not map_path.exists():
         return None, {}
     
     with open(map_path, 'r') as f:
         data = json.load(f)
         
-    master = data.get("master_persona", "Sarthak")
+    master = data.get("master_persona", "User")
     alias_dict = {}
     for platform, aliases in data.get("aliases", {}).items():
         for alias in aliases:
@@ -71,14 +73,14 @@ def load_identity_map():
     return master, alias_dict
 
 def export_to_cosmograph():
-    logging.info("Connecting to Sarthink Database Database for Cosmograph Export...")
+    logging.info("Connecting to Sarthink Database for Cosmograph Export...")
     
     master_persona, identity_aliases = load_identity_map()
     if master_persona:
         logging.info(f"Identity Map Loaded: Resolving configured aliases to -> '{master_persona}'")
 
-    db_path = os.path.join(REPO_ROOT, 'processed_data', 'sarthink_memory.db')
-    conn = sqlite3.connect(db_path)
+    db_path = REPO_ROOT / 'processed_data' / 'db' / 'sarthink_memory.db'
+    conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     
     nodes = [] # format: (id, label, group, weight)
@@ -88,7 +90,7 @@ def export_to_cosmograph():
     node_weights = {}
 
     # 1. EXTRACT BINDING EDGES
-    logging.info("Collapsing 302,000 Messages into relational Vectors...")
+    logging.info("Collapsing Messages into relational Vectors...")
     cursor.execute("""
         SELECT author_id, thread_id, COUNT(*) as weight
         FROM Messages
@@ -160,19 +162,19 @@ def export_to_cosmograph():
     # 4. WRITE THE OUTPUTS
     logging.info(f"Writing {len(nodes)} Nodes & {len(edges)} Edges to Disk...")
     
-    nodes_csv_path = os.path.join(REPO_ROOT, "processed_data", "cosmograph_nodes.csv")
+    nodes_csv_path = REPO_ROOT / "processed_data" / "graph" / "cosmograph_nodes.csv"
     with open(nodes_csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
         writer.writerow(['id', 'label', 'group', 'size', 'color'])
         writer.writerows(nodes)
 
-    edges_csv_path = os.path.join(REPO_ROOT, "processed_data", "cosmograph_edges.csv")
+    edges_csv_path = REPO_ROOT / "processed_data" / "graph" / "cosmograph_edges.csv"
     with open(edges_csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
         writer.writerow(['source', 'target', 'weight'])
         writer.writerows(edges)
         
-    logging.info("Cosmograph rendering structure complete! Target files securely generated.")
+    logging.info("Cosmograph rendering structure complete!")
 
 if __name__ == "__main__":
     export_to_cosmograph()

@@ -7,12 +7,19 @@ import signal
 import sys
 import threading
 from queue import Queue, Empty
+from pathlib import Path
+
+# Resolve paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = Path(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 
 # Configuration loaded from environment
 API_KEY = os.getenv('TWITTER_SOCIALDATA_API_KEY')
 REQUEST_INTERVAL = 0.55  # ~108 req/min (safe under 120 limit)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.path.join(SCRIPT_DIR, 'context_cache.json')
+
+# Data should stay in context/ folder even if script moves
+CACHE_FILE = str(REPO_ROOT / 'processed_data' / 'context' / 'twitter' / 'context_cache.json')
+
 SAVE_INTERVAL = 20
 NUM_WORKERS = 5
 MAX_DEPTH = 100
@@ -63,8 +70,7 @@ def signal_handler(sig, frame):
 
 
 def parse_tweet_files():
-    repo_root = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-    search_path = os.path.join(repo_root, '**', 'tweets*.js')
+    search_path = os.path.join(str(REPO_ROOT), '**', 'tweets*.js')
     tweet_files = glob.glob(search_path, recursive=True)
     initial_ids = set()
     print(f"Found {len(tweet_files)} tweet files.")
@@ -73,14 +79,15 @@ def parse_tweet_files():
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-                json_content = content.replace('window.YTD.tweets.part0 =', '', 1).strip()
-                tweets = json.loads(json_content)
-                
-                for item in tweets:
-                    tweet = item.get('tweet', {})
-                    reply_id = tweet.get('in_reply_to_status_id_str')
-                    if reply_id:
-                        initial_ids.add(reply_id)
+                # Handle potential wrapper
+                idx = content.find('[')
+                if idx != -1:
+                    tweets = json.loads(content[idx:])
+                    for item in tweets:
+                        tweet = item.get('tweet', {})
+                        reply_id = tweet.get('in_reply_to_status_id_str')
+                        if reply_id:
+                            initial_ids.add(reply_id)
         except Exception as e:
             print(f"Error parsing {file_path}: {e}")
             
@@ -99,13 +106,11 @@ def enqueue(tweet_id, depth=0):
 
 def rate_limit():
     global last_request_time
-    # Use separate lock for rate limiting to avoid blocking other operations
     with lock:
         now = time.time()
         wait = REQUEST_INTERVAL - (now - last_request_time)
         last_request_time = now + max(0, wait)  # Reserve this slot
     
-    # Sleep outside the lock
     if wait > 0:
         time.sleep(wait)
 
@@ -158,7 +163,6 @@ def worker():
                 
             elif response.status_code == 429:
                 print(f"Rate limited! Sleeping 60s...")
-                # Re-queue this item
                 with lock:
                     queued.discard(tweet_id)
                 enqueue(tweet_id, depth)
@@ -225,23 +229,19 @@ def main():
     print(f"Queue size: {work_queue.qsize()} items to fetch")
     print(f"Starting {NUM_WORKERS} workers...")
     
-    # Start workers as daemon threads so they die when main exits
     threads = []
     for i in range(NUM_WORKERS):
         t = threading.Thread(target=worker, daemon=True)
         t.start()
         threads.append(t)
     
-    # Wait for queue to empty or stop signal
     try:
         while not stop_event.is_set():
             with lock:
                 cache_size = len(cache)
-                queued_size = len(queued)
             queue_size = work_queue.qsize()
             
             if queue_size == 0:
-                # Wait a bit to see if more items come in
                 time.sleep(2)
                 if work_queue.qsize() == 0:
                     print("Queue empty, finishing up...")
@@ -254,10 +254,7 @@ def main():
         print("\nStopping...")
     
     stop_event.set()
-    
-    # Give workers a moment to finish current work
     time.sleep(2)
-    
     save_cache()
     print(f"Done! Total cached: {len(cache)}")
 

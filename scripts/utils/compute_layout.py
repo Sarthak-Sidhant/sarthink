@@ -17,11 +17,14 @@ import random
 import os
 import sys
 import time
+from pathlib import Path
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE = os.path.dirname(os.path.abspath(__file__))
-NODES_CSV = os.path.join(BASE, '../processed_data/cosmograph_nodes.csv')
-EDGES_CSV = os.path.join(BASE, '../processed_data/cosmograph_edges.csv')
+# Resolve paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = Path(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
+
+NODES_CSV = str(REPO_ROOT / 'processed_data' / 'graph' / 'cosmograph_nodes.csv')
+EDGES_CSV = str(REPO_ROOT / 'processed_data' / 'graph' / 'cosmograph_edges.csv')
 
 random.seed(42)   # deterministic jitter
 
@@ -338,7 +341,7 @@ def main():
     write_csv(NODES_CSV, nodes, fieldnames)
 
     print(f"\n✓ Layout complete.  Positions written to:\n  {NODES_CSV}")
-    print("\nNow open  http://localhost:8080/sarthink_graph.html  — zero simulation, 60fps.")
+    print("\nNow open  sarthink_graph.html  — zero simulation, 60fps.")
 
 if __name__ == '__main__':
     main()

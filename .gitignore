@@ -1,17 +1,30 @@
 # Sarthink Gitignore
 
 # Data & Personal Exports
+archive/
 archive/*
 processed_data/
 config/identity_map.json
 .env
+.env.*
+!.env.example
 
-# Raw Data Traces (Twitter/Reddit Exports)
+# Raw Data Traces & Databases
 *.js
 *.jsonl
 *.csv
 *.db
 *.sqlite
+
+# Archives & Media
+*.zip
+*.tar
+*.tar.gz
+*.gz
+*.mp4
+*.mov
+*.avi
+graph-thing.mp4
 
 # Cache & Metadata
 context_cache.json
@@ -23,10 +36,9 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
-.env
 
+# Temporary & Legacy Folders
 context/reddit/Reddit_Context_Archive (Copy)
 context/reddit/Reddit_Context_Archive
-graph-thing.mp4
 context/reddit/addn.py
 context/reddit/test.py

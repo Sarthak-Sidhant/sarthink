@@ -8,7 +8,8 @@ import json
 import os
 import re
 from datetime import datetime
-import time # Imported for anti-thrashing monotonic clock
+import time 
+from pathlib import Path
 
 # Credentials
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
@@ -17,13 +18,15 @@ REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT")
 REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 
-# Configuration
+# Resolve paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+REPO_ROOT = Path(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 
-POSTS_CSV_PATH = os.path.join(REPO_ROOT, "archive", "reddit-export", "posts.csv")
-COMMENTS_CSV_PATH = os.path.join(REPO_ROOT, "archive", "reddit-export", "comments.csv")
-OUTPUT_DIRECTORY = os.path.join(SCRIPT_DIR, "Reddit_Context_Archive")
+POSTS_CSV_PATH = str(REPO_ROOT / "archive" / "reddit-export" / "posts.csv")
+COMMENTS_CSV_PATH = str(REPO_ROOT / "archive" / "reddit-export" / "comments.csv")
+# Keep context data in original folder
+OUTPUT_DIRECTORY = str(REPO_ROOT / "processed_data" / "context" / "reddit" / "Reddit_Context_Archive")
+
 CONCURRENT_REQUESTS = 25 
 MAX_RETRIES = 3
 INITIAL_BACKOFF_DELAY = 2
@@ -177,8 +180,8 @@ async def process_item(session, item_id, item_type, semaphore, progress_counter,
                 return
 
 async def main():
-    if "YOUR_CLIENT_ID_HERE" in REDDIT_CLIENT_ID:
-        print("[ERROR] Please fill in your credentials at the top of the script.")
+    if not REDDIT_CLIENT_ID or "YOUR_CLIENT_ID_HERE" in REDDIT_CLIENT_ID:
+        print("[ERROR] Please fill in your credentials at the top of the script or set environment variables.")
         return
     
     create_output_directory()
