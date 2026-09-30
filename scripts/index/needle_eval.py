@@ -100,7 +100,7 @@ def run(a):
         model, variant = spec.split("/") if "/" in spec else (a.model, spec)
         key = (model, variant)
         if key not in searchers:
-            searchers[key] = Searcher(model, variant, me_boost=a.me_boost, reranker=reranker)
+            searchers[key] = Searcher(model, variant, me_boost=a.me_boost, reranker=reranker, encoder_url=a.encoder_url)
         s = searchers[key]
         stats = defaultdict(lambda: {"n": 0, "r1": 0, "r5": 0, "r10": 0, "mrr": 0.0})
         for q in qs:
@@ -140,5 +140,6 @@ if __name__ == "__main__":
     r.add_argument("--model", default="Qwen/Qwen3-Embedding-0.6B")
     r.add_argument("--me-boost", type=float, default=0.0)
     r.add_argument("--reranker", default="Qwen/Qwen3-Reranker-4B")
+    r.add_argument("--encoder-url", default=None, help="use a remote embed_server for query vectors")
     a = ap.parse_args()
     asyncio.run(gen(a)) if a.cmd == "gen" else run(a)

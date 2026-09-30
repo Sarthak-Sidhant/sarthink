@@ -17,8 +17,8 @@ TWITTER_ID_MAP = REPO_ROOT / "processed_data" / "metadata" / "twitter_id_map.jso
 IDENTITY_MAP = REPO_ROOT / "config" / "identity_map.json"
 
 
-def connect_index():
-    conn = sqlite3.connect(f"file:{INDEX_DB}", uri=True, timeout=60)
+def connect_index(check_same_thread=True):
+    conn = sqlite3.connect(f"file:{INDEX_DB}", uri=True, timeout=60, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     if SRC_DB.exists():  # absent on remote GPU boxes, which only get the derived index

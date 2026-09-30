@@ -59,77 +59,130 @@ class Reranker:
 
 
 class Searcher:
-    def __init__(self, model="Qwen/Qwen3-Embedding-0.6B", variant="ctx", device=None, me_boost=0.0, reranker=None):
+    """encoder_url: base URL of embed_server.py (query vectors computed on a remote GPU); without it the
+    embedding model is loaded locally. Filters (platform, person_id, since, until, me_only) apply to both
+    the dense and keyword legs."""
+
+    def __init__(self, model="Qwen/Qwen3-Embedding-0.6B", variant="ctx", device=None, me_boost=0.0, reranker=None,
+                 encoder_url=None):
         model = MODELS.get(model, model)
         self.reranker = reranker
+        self.encoder_url = encoder_url.rstrip("/") if encoder_url else None
         self.conn = connect_index()
         base = OUT_DIR / f"emb_{slug(model)}_{variant}"
+        self.model = None
         if (OUT_DIR / f"{base.name}.npy").exists():
-            from sentence_transformers import SentenceTransformer
             self.vecs = np.load(f"{base}.npy").astype(np.float32)
             with open(f"{base}.ids.json") as f:
                 self.ids = json.load(f)["ids"]
-            import torch
-            dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-            kw = {"model_kwargs": {"torch_dtype": torch.bfloat16}} if dev == "cuda" else {}
-            self.model = SentenceTransformer(model, device=dev, **kw)
+            if not self.encoder_url:
+                from sentence_transformers import SentenceTransformer
+                import torch
+                dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+                kw = {"model_kwargs": {"torch_dtype": torch.bfloat16}} if dev == "cuda" else {}
+                self.model = SentenceTransformer(model, device=dev, **kw)
         else:  # keyword-only mode until embeddings are built
-            self.vecs, self.model = None, None
+            self.vecs = None
             self.ids = [r[0] for r in self.conn.execute("SELECT chunk_id FROM Chunks ORDER BY chunk_id")]
         self.row = {cid: i for i, cid in enumerate(self.ids)}
         self.me_boost = me_boost
-        meta = self.conn.execute("SELECT chunk_id, index_policy, me_involved FROM Chunks").fetchall()
-        self.embeddable = np.array([True] * len(self.ids))
+        n = len(self.ids)
+        self.embeddable = np.ones(n, dtype=bool)
+        self.platform = np.empty(n, dtype=object)
+        self.start_ts = np.zeros(n, dtype=np.int64)
+        self.end_ts = np.zeros(n, dtype=np.int64)
+        self.me_arr = np.zeros(n, dtype=bool)
+        self.persons = [()] * n
         self.me = {}
-        for r in meta:
+        for r in self.conn.execute(
+                "SELECT chunk_id, index_policy, me_involved, platform, start_ts, end_ts, person_ids FROM Chunks"):
             self.me[r["chunk_id"]] = r["me_involved"]
-            if r["index_policy"] != "embed" and r["chunk_id"] in self.row:
-                self.embeddable[self.row[r["chunk_id"]]] = False
+            i = self.row.get(r["chunk_id"])
+            if i is None:
+                continue
+            self.embeddable[i] = r["index_policy"] == "embed"
+            self.platform[i] = r["platform"]
+            self.start_ts[i], self.end_ts[i] = r["start_ts"], r["end_ts"]
+            self.me_arr[i] = bool(r["me_involved"])
+            self.persons[i] = tuple(json.loads(r["person_ids"]))
+
+    def mask(self, platform=None, person_id=None, since=None, until=None, me_only=False):
+        """Boolean row mask for the filters, or None when no filter is set."""
+        if not any([platform, person_id, since, until, me_only]):
+            return None
+        m = np.ones(len(self.ids), dtype=bool)
+        if platform:
+            m &= self.platform == platform
+        if since:
+            m &= self.end_ts >= since
+        if until:
+            m &= self.start_ts <= until
+        if me_only:
+            m &= self.me_arr
+        if person_id:
+            m &= np.fromiter((person_id in p for p in self.persons), dtype=bool, count=len(self.persons))
+        return m
 
     def encode_query(self, q):
+        if self.encoder_url:
+            if getattr(self, "_http", None) is None:   # keep-alive: skip a tunnel round trip per query
+                import httpx
+                self._http = httpx.Client(timeout=60)
+            r = self._http.post(f"{self.encoder_url}/embed", json={"texts": [q], "query": True})
+            r.raise_for_status()
+            return np.asarray(r.json()["vectors"][0], dtype=np.float32)
         prompts = getattr(self.model, "prompts", {}) or {}
         kw = {"prompt_name": "query"} if "query" in prompts else {}
         return self.model.encode([q], normalize_embeddings=True, **kw)[0].astype(np.float32)
 
-    def dense(self, q, k=50, include_short=False):
+    def dense(self, q, k=50, include_short=False, mask=None):
         if self.vecs is None:
             return []
         scores = self.vecs @ self.encode_query(q)
         if not include_short:
             scores = np.where(self.embeddable, scores, -1)
-        top = np.argpartition(-scores, k)[:k]
+        if mask is not None:
+            scores = np.where(mask, scores, -np.inf)
+        k = min(k, int(np.isfinite(scores).sum()))
+        if k <= 0:
+            return []
+        top = np.argpartition(-scores, k - 1)[:k]
         top = top[np.argsort(-scores[top])]
         return [(self.ids[i], float(scores[i])) for i in top]
 
-    def fts(self, q, k=50):
+    def fts(self, q, k=50, mask=None):
         terms = [t for t in re.findall(r"\w+", q.lower()) if len(t) > 1]
         if not terms:
             return []
         match = " OR ".join(f'"{t}"' for t in terms)
+        limit = k if mask is None else k * 20   # over-fetch, then keep rows passing the filter
         rows = self.conn.execute(
             "SELECT chunk_id, bm25(ChunksFTS, 0, 2.0, 1.0, 1.0, 0.5) AS s FROM ChunksFTS WHERE ChunksFTS MATCH ? "
-            "ORDER BY s LIMIT ?", (match, k)).fetchall()
-        return [(r["chunk_id"], -r["s"]) for r in rows]
+            "ORDER BY s LIMIT ?", (match, limit)).fetchall()
+        out = [(r["chunk_id"], -r["s"]) for r in rows
+               if mask is None or (r["chunk_id"] in self.row and mask[self.row[r["chunk_id"]]])]
+        return out[:k]
 
     def doc_text(self, cid):
         r = self.conn.execute("SELECT header, text FROM Chunks WHERE chunk_id=?", (cid,)).fetchone()
         return f"{r['header']}\n{r['text']}"
 
-    def search(self, q, k=10, mode="hybrid"):
+    def search(self, q, k=10, mode="hybrid", **filters):
         rerank = mode.endswith("+rerank")
         mode = mode.removesuffix("+rerank")
         if rerank:
-            pool = self.search(q, k=30, mode=mode)  # hybrid R@10 is ~0.98, so the top 30 nearly always holds the answer
+            pool = self.search(q, k=30, mode=mode, **filters)  # hybrid R@10 ~0.98: top 30 nearly always holds it
             scores = self.reranker.score(q, [self.doc_text(cid) for cid, _ in pool])
             ranked = sorted(zip([cid for cid, _ in pool], scores), key=lambda x: -x[1])
             return ranked[:k]
+        m = self.mask(**filters)
         if mode == "dense":
-            ranked = self.dense(q, k=max(k, 50))
+            ranked = self.dense(q, k=max(k, 50), mask=m)
         elif mode == "fts":
-            ranked = self.fts(q, k=max(k, 50))
+            ranked = self.fts(q, k=max(k, 50), mask=m)
         else:
             fused = {}
-            for lst in (self.dense(q), self.fts(q)):
+            for lst in (self.dense(q, mask=m), self.fts(q, mask=m)):
                 for rank, (cid, _) in enumerate(lst):
                     fused[cid] = fused.get(cid, 0) + 1 / (RRF_K + rank + 1)
             ranked = sorted(fused.items(), key=lambda x: -x[1])

@@ -1,0 +1,599 @@
+"""Sarthink memory agent: DeepSeek (thinking mode) + tools over the memory index.
+
+Tools
+  search_memory      hybrid semantic+keyword search with person/platform/date/me_only filters
+  read_conversation  a full conversation span (session) + its summary + neighbouring sessions
+  find_person        name -> person candidates
+  run_sql            read-only SQL over a simple `messages` / `people` view, for counts and stats
+
+Every search hit / conversation the agent sees is registered as a numbered source [n]. The final answer
+must cite [n]; the API returns only the cited sources, each with message ids and graph nodes (P_/T_) so
+the viewer can highlight them.
+"""
+import concurrent.futures as cf
+import datetime as dt
+import json
+import re
+import sqlite3
+import threading
+import time
+
+from dotenv import dotenv_values
+from openai import OpenAI
+
+from common import INDEX_DB, REPO_ROOT, SRC_DB
+
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+MAX_STEPS = 10
+SQL_ROW_LIMIT = 50
+
+SYSTEM = """You are Sarthink, the private memory of Sarthak Sidhant. Your knowledge is his archive of
+302k messages across Twitter/X, Reddit, Discord, Instagram and Facebook (2011 to early 2026). You answer his
+questions about his own life, conversations and people, speaking to him as "you".
+
+Today is {today}. Times are shown in IST.
+
+How to work:
+- Always look things up with tools before answering; never answer from general knowledge.
+- search_memory is your main tool. Search 2-3 different phrasings when the first try is weak, and use its
+  filters: `person` when a name is mentioned, `since`/`until` for time periods, `me_only=true` when the
+  question is about his own conversations ("I", "my", "we"). Short keyword-style queries work well; the
+  archive is in English, Hindi and Hinglish, so try Hinglish phrasings for Hinglish chats.
+- Search hits are excerpts. Use read_conversation on the most promising hits before stating details, so
+  you read the full context and the replies.
+- Use run_sql for anything countable: who he talks to most, message counts, when something started or
+  stopped, activity over time. Never estimate numbers from search results.
+- For questions about a relationship or a person in general, start with person_overview, then read a few of
+  the example conversations it gives for the themes you mention. Its numbers are exact; cite them as [sql].
+- Use find_person when a name is ambiguous or you need someone's person_id.
+
+How to answer:
+- Every factual claim must cite its source with [n], using the numbers shown in tool results. SQL results
+  are cited as [sql] and the query summarised in words.
+- Separate what Sarthak said from what others said. Give dates. Quote short phrases verbatim when useful
+  (keep Hinglish as written).
+- If the evidence is weak, partial or conflicting, say so plainly. If nothing relevant is found after a
+  few searches, say you could not find it — never guess or invent.
+- When several conversations are relevant, summarise across them rather than picking one.
+- Cite individual numbers like [3] or [3][5]; never ranges.
+- Privacy: never repeat phone numbers, email addresses, street addresses, passwords, OTPs, bank/card/ID numbers, order/tracking numbers
+  or similar personal identifiers — even Sarthak's own — unless he explicitly asks for that exact detail.
+  Say "your address" / "an email" instead.
+- Be concise: a short direct answer first, then supporting details. Markdown is fine."""
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "search_memory",
+        "description": "Hybrid semantic + keyword search over chat excerpts. Returns numbered excerpts with date, "
+                       "platform, participants and a session_id for read_conversation.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "what to look for; short and specific works best"},
+            "person": {"type": "string", "description": "only chats with this person (name or P_<id>)"},
+            "platform": {"type": "string", "enum": ["twitter", "reddit", "discord", "instagram", "facebook"]},
+            "since": {"type": "string", "description": "YYYY-MM-DD"},
+            "until": {"type": "string", "description": "YYYY-MM-DD"},
+            "me_only": {"type": "boolean", "description": "only conversations Sarthak took part in"},
+            "k": {"type": "integer", "description": "number of results, default 8, max 15"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "read_conversation",
+        "description": "Read a whole conversation span (session) by session_id: full messages, an AI summary, "
+                       "and the ids of the previous/next sessions of the same chat.",
+        "parameters": {"type": "object", "properties": {
+            "session_id": {"type": "string"},
+        }, "required": ["session_id"]}}},
+    {"type": "function", "function": {
+        "name": "person_overview",
+        "description": "Everything-at-a-glance for one person, computed over ALL conversations with them: exact "
+                       "message counts, first/last contact, platforms, busiest months, and recurring THEMES "
+                       "(each with example conversations as numbered sources). Use it for 'what do X and I talk "
+                       "about', 'tell me about my friendship with X', 'how did things with X change'.",
+        "parameters": {"type": "object", "properties": {
+            "person": {"type": "string", "description": "name or P_<id>"}}, "required": ["person"]}}},
+    {"type": "function", "function": {
+        "name": "find_person",
+        "description": "Find people by (partial) name; returns person_id, platform and message count.",
+        "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {
+        "name": "run_sql",
+        "description": (
+            "Read-only SQLite SELECT for counts and stats. Views:\n"
+            "  messages(msg_id, person_id, person, is_me, platform, thread_id, thread, ts, day, content)\n"
+            "    one row per message; is_me=1 for Sarthak; ts = unix seconds UTC; day = 'YYYY-MM-DD' (IST)\n"
+            "  people(person_id, name, is_me, platform)\n"
+            "  threads(thread_id, platform, title, is_dm)\n"
+            "Sarthak's person_id is 1. Example — who he talks with most in DMs:\n"
+            "  SELECT o.person, COUNT(*) n FROM messages o JOIN threads t USING(thread_id) WHERE t.is_dm=1 "
+            "AND o.is_me=0 AND o.thread_id IN (SELECT thread_id FROM messages WHERE is_me=1) "
+            "GROUP BY o.person_id ORDER BY n DESC LIMIT 10\n"
+            f"Results are capped at {SQL_ROW_LIMIT} rows; long text is truncated."),
+        "parameters": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}},
+]
+
+
+CITE_RE = re.compile(r"\[((?:\d+\s*(?:[-–—]\s*\d+)?\s*,?\s*)+)\]")
+
+
+def cited_numbers(text):
+    """Numbers cited as [3], [3, 5], [3-5] / [3–5]."""
+    out = set()
+    for group in CITE_RE.findall(text or ""):
+        for part in re.split(r"\s*,\s*", group.strip().strip(",")):
+            m = re.match(r"^(\d+)\s*[-–—]\s*(\d+)$", part)
+            if m:
+                a, b = int(m.group(1)), int(m.group(2))
+                if 0 < b - a <= 30:
+                    out.update(range(a, b + 1))
+            elif part.isdigit():
+                out.add(int(part))
+    return out
+
+
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+PHONE_RE = re.compile(r"(?<![\w/])(?:\+?\d[\d\s-]{8,}\d)(?![\w/])")
+ORDER_RE = re.compile(r"(?i)\b(order|invoice|tracking|awb)(\s*(?:no\.?|number|id|#)?\s*[:#]?\s*)([A-Z0-9][A-Z0-9-]{4,})")
+
+
+def redact(text):
+    """Deterministic safety net: mask emails and phone-like numbers in final answers (prompt rules can slip,
+    e.g. inside verbatim quotes)."""
+    text = EMAIL_RE.sub("[email hidden]", text or "")
+    text = ORDER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[hidden]" if any(c.isdigit() for c in m.group(3))
+                        else m.group(), text)
+    return PHONE_RE.sub(lambda m: "[number hidden]" if sum(c.isdigit() for c in m.group()) >= 10 else m.group(), text)
+
+
+def fmt_date(iso):
+    if not iso:
+        return "?"
+    return dt.datetime.fromisoformat(iso).astimezone(IST).strftime("%d %b %Y")
+
+
+class SqlTool:
+    """Read-only connection with temp views; an authorizer blocks anything but reading."""
+
+    def __init__(self):
+        self.conn = sqlite3.connect(f"file:{INDEX_DB}?mode=ro", uri=True, check_same_thread=False)
+        self.conn.execute(f"ATTACH DATABASE 'file:{SRC_DB}?mode=ro' AS src")
+        self.conn.executescript("""
+            CREATE TEMP VIEW people AS
+              SELECT p.person_id, p.name, p.is_me, MIN(a.platform) AS platform
+              FROM Persons p JOIN PersonAliases a USING(person_id) GROUP BY p.person_id;
+            CREATE TEMP VIEW threads AS
+              SELECT id AS thread_id, platform, title,
+                     CASE WHEN platform = 'discord' OR lower(title) LIKE 'dm%'
+                               OR (platform IN ('instagram','facebook') AND lower(title) NOT LIKE 'comment on%')
+                               OR platform_thread_id LIKE '%:reddit.com%' THEN 1 ELSE 0 END AS is_dm
+              FROM src.Threads;
+            CREATE TEMP VIEW messages AS
+              SELECT m.msg_id, a.person_id, p.name AS person, p.is_me, t.platform, m.thread_id, t.title AS thread,
+                     m.timestamp_utc AS ts, date(m.timestamp_utc, 'unixepoch', '+330 minutes') AS day, m.content
+              FROM src.Messages m JOIN PersonAliases a ON a.user_id = m.author_id
+              JOIN Persons p ON p.person_id = a.person_id JOIN src.Threads t ON t.id = m.thread_id;
+        """)
+        self.conn.set_authorizer(self._authorize)
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _authorize(action, *args):
+        allowed = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
+                   getattr(sqlite3, "SQLITE_RECURSIVE", 33)}
+        return sqlite3.SQLITE_OK if action in allowed else sqlite3.SQLITE_DENY
+
+    def run(self, sql):
+        with self.lock:
+            return self._run(sql)
+
+    def _run(self, sql):
+        if not re.match(r"^\s*(select|with)\b", sql, re.I) or ";" in sql.strip().rstrip(";"):
+            return {"error": "only a single SELECT statement is allowed"}
+        deadline = time.time() + 8
+        self.conn.set_progress_handler(lambda: 1 if time.time() > deadline else 0, 10000)
+        try:
+            cur = self.conn.execute(sql)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchmany(SQL_ROW_LIMIT + 1)
+        except sqlite3.Error as e:
+            return {"error": str(e)}
+        finally:
+            self.conn.set_progress_handler(None, 0)
+        trunc = lambda v: (v[:200] + "…") if isinstance(v, str) and len(v) > 200 else v  # noqa: E731
+        return {"columns": cols, "rows": [[trunc(v) for v in r] for r in rows[:SQL_ROW_LIMIT]],
+                "truncated": len(rows) > SQL_ROW_LIMIT}
+
+
+THEMES = """Below are all conversation sessions between Sarthak and {name}, one per line:
+session_id | month | topics of that session.
+
+Group them into 5-10 recurring THEMES that describe what they talk about (merge near-duplicates; a session can
+belong to 2 themes; skip one-off noise). Order themes by number of sessions. Return JSON:
+{{"themes": [{{"theme": "short name", "description": "one sentence", "session_ids": ["s_..."]}}]}}
+
+{lines}"""
+
+PROFILE_CACHE = REPO_ROOT / "processed_data" / "db" / "profile_cache.db"
+
+
+class PersonProfiles:
+    """Exact stats (SQL) + LLM-grouped conversation themes per person, cached on disk."""
+
+    def __init__(self, sql, client, model="deepseek-flash", version="v1"):
+        self.sql, self.client, self.model, self.version = sql, client, model, version
+        self.cache = sqlite3.connect(PROFILE_CACHE, check_same_thread=False)
+        self.cache.execute("CREATE TABLE IF NOT EXISTS Profiles (person_id INTEGER, version TEXT, data TEXT, "
+                           "PRIMARY KEY (person_id, version))")
+        self.lock = threading.Lock()
+
+    def _q(self, sql, args=()):
+        with self.sql.lock:
+            return self.sql.conn.execute(sql, args).fetchall()
+
+    def get(self, person_id):
+        with self.lock:
+            row = self.cache.execute("SELECT data FROM Profiles WHERE person_id=? AND version=?",
+                                     (person_id, self.version)).fetchone()
+        if row:
+            return json.loads(row[0])
+        prof = self._build(person_id)
+        with self.lock:
+            self.cache.execute("INSERT OR REPLACE INTO Profiles VALUES (?,?,?)",
+                               (person_id, self.version, json.dumps(prof, ensure_ascii=False)))
+            self.cache.commit()
+        return prof
+
+    def _build(self, pid):
+        name = self._q("SELECT name FROM Persons WHERE person_id=?", (pid,))[0][0]
+        threads = [r[0] for r in self._q(
+            "SELECT DISTINCT thread_id FROM messages WHERE person_id=?", (pid,))]
+        if not threads:
+            return {"person_id": pid, "name": name, "messages": 0}
+        ph = ",".join("?" * len(threads))
+        stats = self._q(f"""SELECT COUNT(*), SUM(is_me), SUM(person_id=?), MIN(day), MAX(day),
+                                   GROUP_CONCAT(DISTINCT platform)
+                            FROM messages WHERE thread_id IN ({ph})""", (pid, *threads))[0]
+        months = self._q(f"""SELECT substr(day,1,7) m, COUNT(*) n FROM messages WHERE thread_id IN ({ph})
+                             AND day IS NOT NULL GROUP BY m ORDER BY n DESC LIMIT 4""", tuple(threads))
+        sessions = self._q("""SELECT s.session_id, s.start_ts, x.data FROM Sessions s
+            JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model='deepseek-flash' AND x.prompt_version='v3'
+            WHERE EXISTS (SELECT 1 FROM json_each(s.person_ids) j WHERE j.value = ?) ORDER BY s.start_ts""", (pid,))
+        themes = []
+        if sessions:
+            lines = []
+            for sid, ts, data in sessions[-400:]:
+                topics = "; ".join((json.loads(data).get("topics") or [])[:6])
+                month = dt.datetime.fromtimestamp(ts, IST).strftime("%Y-%m")
+                lines.append(f"{sid} | {month} | {topics}")
+            r = self.client.chat.completions.create(
+                model=self.model, response_format={"type": "json_object"}, max_tokens=8000,
+                extra_body={"thinking": {"type": "disabled"}},
+                messages=[{"role": "user", "content": THEMES.format(name=name, lines="\n".join(lines))}])
+            try:
+                known = {s[0] for s in sessions}
+                for t in json.loads(r.choices[0].message.content).get("themes", []):
+                    ids = [s for s in t.get("session_ids", []) if s in known]
+                    if ids:
+                        themes.append({"theme": t.get("theme"), "description": t.get("description"),
+                                       "sessions": len(ids), "session_ids": ids})
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return {"person_id": pid, "name": name, "platforms": stats[5], "messages_total": stats[0],
+                "messages_by_sarthak": stats[1], "messages_by_them": stats[2], "first_day": stats[3],
+                "last_day": stats[4], "busiest_months": [{"month": m, "messages": n} for m, n in months],
+                "sessions_summarized": len(sessions), "themes": themes}
+
+
+PLANNER = """You plan research for a personal-memory assistant over Sarthak's chat archive (Twitter, Reddit,
+Discord, Instagram, Facebook; 2011-2026). Today is {today}.
+
+Decide if the question needs ONE line of research ("simple": a specific lookup, one count, one person's
+single fact) or SEVERAL independent lines worth running in parallel:
+- "ambiguous": could refer to several different episodes -> one task per plausible interpretation
+- "collect": asks for all/every/list of things -> split by category, platform or time period
+- "compare": two or more people/things -> one task per side (plus a stats task if counts matter)
+- "temporal": change over time -> split into periods, plus a stats task for activity over time
+- "cross": across platforms -> one task per relevant platform
+- "person": broad question about a relationship -> overview/themes task + tasks for key themes/episodes
+Each task must be self-contained and specific, with optional hints (person, platform, since, until,
+suggested search queries). Use 2-4 tasks; never split simple questions. Facebook is tiny (a few hundred
+messages): never give it its own task — fold it into another task.
+
+Return JSON: {{"type": "simple|ambiguous|collect|compare|temporal|cross|person", "why": "one line",
+"tasks": [{{"id": 1, "goal": "...", "hints": {{"person": null, "platform": null, "since": null,
+"until": null, "queries": ["..."]}}}}]}}  (tasks = [] when simple)
+
+QUESTION: {question}"""
+
+RESEARCHER = """
+
+You are one RESEARCHER in a team. Research only YOUR TASK thoroughly (search several phrasings, read the most
+relevant conversations, use SQL/person_overview when counts or relationships matter). Then return an
+EVIDENCE BRIEF, not a polished answer: bullet points of concrete facts (who, what, when, quotes), each with its
+[n] citations exactly as numbered in tool results. Include a final bullet "Not found:" listing anything you
+searched for but could not find. No speculation."""
+
+WRITER = """
+
+You are the WRITER. Researchers have gathered evidence briefs for the question. Write the final answer for
+Sarthak using ONLY facts in the briefs and database results, keeping their [n] citations (numbers are shared
+across briefs; cite [sql] for database numbers). Merge overlapping facts, resolve contradictions by saying
+so, lead with the direct answer, and keep it concise. If the briefs found nothing relevant, say so plainly."""
+
+VERIFY = """You are the fact-checker for a personal-memory assistant. Below is a DRAFT answer to the user's
+question and ALL the sources the assistant read, numbered [n]. Produce the final answer.
+
+Rules:
+- Check every factual claim against the sources. If it is supported by a source, make sure it cites that
+  source's number (fix wrong or missing citations; a claim can cite several).
+- If a claim is not supported by any source, delete it — or, if it is a reasonable inference worth keeping,
+  rewrite it as clearly marked speculation ("possibly…", "my guess is…") without a citation.
+- Do not add new facts. Do not change facts that are supported. Keep the structure, tone, language and
+  length of the draft; keep verbatim quotes exactly as in the source.
+- [sql] marks database results; keep those claims as they are.
+- If deleting unsupported parts leaves nothing useful, say what could and could not be found.
+
+Return JSON: {{"answer": "<final markdown answer>", "changes": ["short description of each change"]}}
+
+QUESTION: {question}
+
+DRAFT ANSWER:
+{draft}
+
+SOURCES:
+{sources}"""
+
+
+class Agent:
+    """backend: object with search(q, k, **filters) -> list[chunk payload], session(id) -> dict,
+    person(name) -> list[dict]; payloads are the API's JSON shapes."""
+
+    def __init__(self, backend, model="deepseek-v4-pro", thinking=True, verify=False, verify_model="deepseek-flash"):
+        env = dotenv_values(REPO_ROOT / ".env")
+        self.client = OpenAI(api_key=env["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com", timeout=300)
+        self.backend = backend
+        self.model = model
+        self.thinking = thinking
+        self.verify = verify
+        self.verify_model = verify_model
+        self.sql = SqlTool()
+        self.profiles = PersonProfiles(self.sql, self.client)
+        self._lock = threading.RLock()
+        self.research_model = "deepseek-v4-pro"   # flash researchers were cheaper but measurably worse
+
+    # ---- verifier ----------------------------------------------------------------------------
+    @staticmethod
+    def _source_text(s):
+        body = s["text"] if s["kind"] == "conversation" else s["text"]
+        return f"[{s['n_']}] {s['header']} ({fmt_date(s['start'])})\n{body[:9000]}"
+
+    def _verify(self, question, draft, sources, trace, usage):
+        if not sources or not draft:
+            return draft, []
+        blocks = [self._source_text({**s, "n_": n}) for n, s in sources.items()]
+        sql = [f"[sql] {x['tool']} {json.dumps(x['args'], ensure_ascii=False)}\n-> "
+               f"{json.dumps(x.get('result'), ensure_ascii=False)[:3000]}"
+               for x in trace if x["tool"] in ("run_sql", "person_overview") and x.get("result")]
+        t0 = time.time()
+        r = self.client.chat.completions.create(
+            model=self.verify_model, response_format={"type": "json_object"}, max_tokens=16000,
+            messages=[{"role": "user", "content": VERIFY.format(
+                question=question, draft=draft, sources="\n\n".join(blocks + sql))}])
+        usage["in"] += r.usage.prompt_tokens
+        usage["out"] += r.usage.completion_tokens
+        try:
+            out = json.loads(r.choices[0].message.content)
+            answer, changes = out["answer"], out.get("changes", [])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return draft, ["verifier returned no valid JSON; draft kept"]
+        trace.append({"tool": "verify", "args": {}, "ms": int((time.time() - t0) * 1000), "error": None,
+                      "changes": changes})
+        return answer, changes
+
+    # ---- tools -------------------------------------------------------------------------------
+    def _register(self, sources, key, payload):
+        with self._lock:                                  # researchers run in parallel, one shared numbering
+            for n, s in sources.items():
+                if s["key"] == key:
+                    return n
+            n = len(sources) + 1
+            sources[n] = {"key": key, **payload}
+            return n
+
+    def _search(self, sources, query, k=8, **filters):
+        k = max(1, min(int(k or 8), 15))
+        filters = {f: v for f, v in filters.items() if v not in (None, "")}
+        try:
+            hits = self.backend.search(query, k, **filters)
+        except Exception as e:
+            return {"error": str(e)[:300]}
+        out = []
+        for h in hits:
+            n = self._register(sources, ("chunk", h["chunk_id"]), {"kind": "excerpt", **h})
+            out.append({"n": n, "date": fmt_date(h["start"]), "platform": h["platform"], "where": h["header"],
+                        "summary": h.get("context"), "excerpt": h["text"][:700], "session_id": h["session_id"]})
+        return {"results": out} if out else {"results": [], "note": "nothing found; try other words or filters"}
+
+    def _read(self, sources, session_id, limit=9000):
+        try:
+            s = self.backend.session(session_id)
+        except Exception as e:
+            return {"error": str(e)[:300]}
+        n = self._register(sources, ("session", session_id), {"kind": "conversation", **s})
+        text = s["text"]
+        note = None
+        if len(text) > limit:
+            text, note = text[:limit], "truncated; the rest continues in next_session or later messages"
+        summ = (s.get("summary") or {}).get("summary")
+        return {"n": n, "where": s["header"], "from": fmt_date(s["start"]), "to": fmt_date(s["end"]),
+                "summary": summ, "messages": text, "note": note,
+                "previous_session": s.get("previous_session"), "next_session": s.get("next_session")}
+
+    def _overview(self, sources, person):
+        p = str(person)
+        if p.startswith("P_") and p[2:].isdigit():
+            pid = int(p[2:])
+        else:
+            cands = self.backend.person(p)
+            if not cands:
+                return {"error": f"no person matching {person!r}"}
+            pid = cands[0]["person_id"]
+        try:
+            prof = self.profiles.get(pid)
+        except Exception as e:
+            return {"error": str(e)[:300]}
+        out = {k: v for k, v in prof.items() if k != "themes"}
+        out["themes"] = []
+        for t in prof.get("themes", []):
+            examples = []
+            for sid in t["session_ids"][-3:]:          # most recent examples
+                try:
+                    sess = self.backend.session(sid)
+                except Exception:
+                    continue
+                n = self._register(sources, ("session", sid), {"kind": "conversation", **sess})
+                examples.append({"n": n, "date": fmt_date(sess["start"]), "session_id": sid})
+            out["themes"].append({"theme": t["theme"], "description": t["description"],
+                                  "sessions": t["sessions"], "examples": examples})
+        return out
+
+    def _call(self, name, args, sources, trace, label=None):
+        t0 = time.time()
+        if name == "search_memory":
+            res = self._search(sources, **args)
+        elif name == "read_conversation":
+            res = self._read(sources, args.get("session_id", ""), limit=6000 if label else 9000)
+        elif name == "person_overview":
+            res = self._overview(sources, args.get("person", ""))
+        elif name == "find_person":
+            res = {"candidates": self.backend.person(args.get("name", ""))[:8]}
+        elif name == "run_sql":
+            res = self.sql.run(args.get("sql", ""))
+        else:
+            res = {"error": f"unknown tool {name}"}
+        entry = {"tool": name, "args": args, "ms": int((time.time() - t0) * 1000),
+                 "error": res.get("error") if isinstance(res, dict) else None, "by": label or "agent"}
+        if name == "run_sql" and "rows" in res:
+            entry["result"] = {"columns": res["columns"], "rows": res["rows"][:15]}
+        if name == "person_overview" and "error" not in res:
+            entry["result"] = {k: v for k, v in res.items() if k != "themes"} | {
+                "themes": [{k: t[k] for k in ("theme", "description", "sessions")} for t in res.get("themes", [])]}
+        trace.append(entry)
+        return json.dumps(res, ensure_ascii=False)
+
+    # ---- loop --------------------------------------------------------------------------------
+    def _loop(self, messages, sources, trace, usage, max_steps=MAX_STEPS, label=None, model=None):
+        """Tool-calling loop; returns the model's final text."""
+        extra = None if self.thinking else {"thinking": {"type": "disabled"}}
+        for step in range(max_steps + 1):
+            final_round = step == max_steps
+            r = self.client.chat.completions.create(
+                model=model or self.model, messages=messages, tools=TOOLS, extra_body=extra, max_tokens=8000,
+                tool_choice="none" if final_round else "auto")
+            with self._lock:
+                usage["in"] += r.usage.prompt_tokens
+                usage["out"] += r.usage.completion_tokens
+            m = r.choices[0].message
+            msg = {"role": "assistant", "content": m.content or ""}
+            rc = getattr(m, "reasoning_content", None)
+            if rc:
+                msg["reasoning_content"] = rc   # thinking mode: pass reasoning back within the tool loop
+            if m.tool_calls and not final_round:
+                msg["tool_calls"] = [{"id": tc.id, "type": "function",
+                                      "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                                     for tc in m.tool_calls]
+                messages.append(msg)
+                for tc in m.tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    messages.append({"role": "tool", "tool_call_id": tc.id,
+                                     "content": self._call(tc.function.name, args, sources, trace, label)})
+                continue
+            return m.content or ""
+        return ""
+
+    # ---- multi-agent: planner -> parallel researchers -> writer -------------------------------
+    def _plan(self, question, today, usage):
+        r = self.client.chat.completions.create(
+            model="deepseek-flash", response_format={"type": "json_object"}, max_tokens=2000,
+            extra_body={"thinking": {"type": "disabled"}},
+            messages=[{"role": "user", "content": PLANNER.format(today=today, question=question)}])
+        with self._lock:
+            usage["in"] += r.usage.prompt_tokens
+            usage["out"] += r.usage.completion_tokens
+        try:
+            plan = json.loads(r.choices[0].message.content)
+            tasks = [t for t in plan.get("tasks", []) if isinstance(t, dict) and t.get("goal")][:4]
+            return {"type": plan.get("type", "simple"), "tasks": tasks, "why": plan.get("why", "")}
+        except (json.JSONDecodeError, AttributeError):
+            return {"type": "simple", "tasks": [], "why": "planner output unreadable"}
+
+    def _research(self, question, task, today, sources, trace, usage):
+        hints = task.get("hints") or {}
+        messages = [{"role": "system", "content": SYSTEM.format(today=today) + RESEARCHER},
+                    {"role": "user", "content": f"Overall question: {question}\n\nYOUR TASK: {task['goal']}\n"
+                                                f"Hints (optional): {json.dumps(hints, ensure_ascii=False)}"}]
+        return self._loop(messages, sources, trace, usage, max_steps=5, label=f"researcher {task.get('id', '?')}",
+                          model=self.research_model)
+
+    def _write(self, question, today, briefs, trace, usage):
+        sql = [f"[sql] {x['tool']} {json.dumps(x['args'], ensure_ascii=False)} -> "
+               f"{json.dumps(x.get('result'), ensure_ascii=False)[:1500]}"
+               for x in trace if x["tool"] in ("run_sql", "person_overview") and x.get("result")]
+        body = "\n\n".join(f"### Brief {i + 1}: {goal}\n{text}" for i, (goal, text) in enumerate(briefs))
+        messages = [{"role": "system", "content": SYSTEM.format(today=today) + WRITER},
+                    {"role": "user", "content": f"QUESTION: {question}\n\nRESEARCH BRIEFS:\n{body}\n\n"
+                                                f"DATABASE RESULTS:\n" + ("\n".join(sql) or "(none)")}]
+        extra = None if self.thinking else {"thinking": {"type": "disabled"}}
+        r = self.client.chat.completions.create(model=self.model, messages=messages, extra_body=extra,
+                                                max_tokens=8000)
+        with self._lock:
+            usage["in"] += r.usage.prompt_tokens
+            usage["out"] += r.usage.completion_tokens
+        return r.choices[0].message.content or ""
+
+    def ask(self, question, history=None, multi=True):
+        t_start = time.time()
+        today = dt.datetime.now(IST).strftime("%d %b %Y")
+        sources, trace, usage = {}, [], {"in": 0, "out": 0}
+        plan = self._plan(question, today, usage) if multi and not history else {"type": "simple", "tasks": []}
+        trace.append({"tool": "plan", "args": {"type": plan["type"], "tasks": [t["goal"] for t in plan["tasks"]]},
+                      "ms": int((time.time() - t_start) * 1000), "error": None})
+
+        if len(plan["tasks"]) >= 2:
+            with cf.ThreadPoolExecutor(len(plan["tasks"])) as ex:
+                futs = [ex.submit(self._research, question, t, today, sources, trace, usage) for t in plan["tasks"]]
+                briefs = [(t["goal"], f.result()) for t, f in zip(plan["tasks"], futs)]
+            answer = self._write(question, today, briefs, trace, usage)
+            mode = "multi"
+        else:
+            messages = [{"role": "system", "content": SYSTEM.format(today=today)}]
+            for turn in (history or [])[-6:]:
+                messages.append({"role": turn["role"], "content": turn["content"]})
+            messages.append({"role": "user", "content": question})
+            answer = self._loop(messages, sources, trace, usage)
+            mode = "single"
+
+        draft, changes = answer, []
+        if self.verify:
+            answer, changes = self._verify(question, draft, sources, trace, usage)
+
+        answer = redact(answer)
+        nums = cited_numbers(answer)
+        cited = sorted(n for n in nums if n in sources)
+        bad = sorted(n for n in nums if n not in sources and n < 1000)   # [2020] is a year, not a cite
+        out_sources = []
+        for n in cited:
+            s = sources[n]
+            out_sources.append({
+                "n": n, "kind": s["kind"], "header": s["header"], "platform": s["platform"],
+                "date": fmt_date(s["start"]), "session_id": s["session_id"], "chunk_id": s.get("chunk_id"),
+                "snippet": ((s.get("summary") or {}).get("summary") if s["kind"] == "conversation"
+                            else s.get("context")) or s["text"][:300],
+                "nodes": s["nodes"], "message_ids": s.get("message_ids", []),
+                "people": s.get("people", []),
+            })
+        return {"question": question, "answer": answer, "mode": mode, "plan": plan,
+                "draft": draft if self.verify else None, "verifier_changes": changes, "sources": out_sources,
+                "invalid_citations": bad, "steps": trace, "model": self.model, "thinking": self.thinking,
+                "tokens": usage, "seconds": round(time.time() - t_start, 1)}
