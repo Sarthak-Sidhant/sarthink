@@ -217,8 +217,14 @@ class SqlTool:
               FROM src.Threads;
             CREATE TEMP VIEW messages AS
               SELECT m.msg_id, a.person_id, p.name AS person, p.is_me, t.platform, m.thread_id, t.title AS thread,
-                     m.timestamp_utc AS ts, date(m.timestamp_utc, 'unixepoch', '+330 minutes') AS day, m.content
-              FROM src.Messages m JOIN PersonAliases a ON a.user_id = m.author_id
+                     t2.ts AS ts, date(t2.ts, 'unixepoch', '+330 minutes') AS day, m.content
+              FROM src.Messages m
+              JOIN (SELECT msg_id,
+                           COALESCE(timestamp_utc,
+                                    CASE WHEN substr(msg_id, 1, 8) = 'twitter_' AND substr(msg_id, 9) GLOB '[0-9]*'
+                                         THEN ((CAST(substr(msg_id, 9) AS INTEGER) >> 22) + 1288834974657) / 1000 END) AS ts
+                    FROM src.Messages) t2 ON t2.msg_id = m.msg_id   -- null tweet times recovered from Snowflake ids
+              JOIN PersonAliases a ON a.user_id = m.author_id
               JOIN Persons p ON p.person_id = a.person_id JOIN src.Threads t ON t.id = m.thread_id;
         """)
         self.conn.set_authorizer(self._authorize)

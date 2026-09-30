@@ -57,6 +57,8 @@ CASES = [
      ["ZimaBlade", "Porkifiable bought it", "crypto"], False),
 ]
 
+SESSION_OF = {}   # case id -> the session that holds the answer (generated lookups)
+
 HARD = [
     (21, "ambiguous", "What did datavorous need help with?",
      ["frontend/React/authentication help (Jul 2025)", "mentions more than one project or episode"], False),
@@ -152,7 +154,13 @@ def judge(client, case, res, api):
 
 def main(a):
     client = OpenAI(api_key=dotenv_values(REPO / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
-    pool = {"basic": CASES, "hard": HARD, "temporal": TEMPORAL, "all": CASES + HARD + TEMPORAL}[a.set]
+    v2 = []
+    v2_file = OUT / "cases_v2.json"
+    if v2_file.exists():
+        v2 = [(c["id"], c["type"], c["question"], c["facts"], c["abstain"]) for c in json.loads(v2_file.read_text())]
+        SESSION_OF.update({c["id"]: c["session_id"] for c in json.loads(v2_file.read_text()) if c.get("session_id")})
+    pool = {"basic": CASES, "hard": HARD, "temporal": TEMPORAL, "v2": v2,
+            "all": CASES + HARD + TEMPORAL + v2}[a.set]
     cases = [c for c in pool if not a.only or c[0] in {int(x) for x in a.only.split(",")}]
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +188,9 @@ def main(a):
             correct = (sum(bool(x) for x in found) / len(facts)) if facts else None
             unsup = j.get("unsupported") or []
             abstain_ok = (bool(j.get("abstained")) == abstain) if abstain else not j.get("abstained")
-            row = {"mode": res.get("mode"), "plan_type": (res.get("plan") or {}).get("type"),
+            want = SESSION_OF.get(cid)
+            row = {"found_session": (any(x["session_id"] == want for x in res["sources"]) if want else None),
+                   "mode": res.get("mode"), "plan_type": (res.get("plan") or {}).get("type"),
                    "pii_leak": bool(j.get("pii_leak")), "id": cid, "type": typ, "correct": correct, "unsupported": len(unsup), "claims": j.get("claims_checked"),
                    "abstain_ok": abstain_ok, "invalid_cites": len(res["invalid_citations"]),
                    "sources": len(res["sources"]), "tools": len(res["steps"]), "seconds": res["seconds"],
@@ -201,6 +211,8 @@ def main(a):
         "abstain_accuracy": round(sum(r["abstain_ok"] for r in ok) / max(len(ok), 1), 3),
         "invalid_citations": sum(r["invalid_cites"] for r in ok),
         "pii_leaks": sum(r["pii_leak"] for r in ok),
+        "cited_the_right_conversation": (lambda xs: f"{sum(xs)}/{len(xs)}" if xs else None)(
+            [r["found_session"] for r in ok if r.get("found_session") is not None]),
         "median_seconds": sorted(r["seconds"] for r in ok)[len(ok) // 2] if ok else None,
         "mean_tokens_in": int(sum(r["tokens_in"] for r in ok) / max(len(ok), 1)),
         "cache_hit_share": round(sum(r.get("tokens_cached", 0) for r in ok) / max(sum(r["tokens_in"] for r in ok), 1), 2),
@@ -217,6 +229,6 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="baseline")
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--verify", action="store_true")
-    ap.add_argument("--set", choices=["basic", "hard", "temporal", "all"], default="basic")
+    ap.add_argument("--set", choices=["basic", "hard", "temporal", "v2", "all"], default="basic")
     ap.add_argument("--multi", action="store_true", help="enable the planner / multi-agent 'deep research' path")
     main(ap.parse_args())
