@@ -45,7 +45,12 @@ Result: 44,016 sessions, 53,807 chunks (49,928 embed, 3,879 fts_only).
    Known: deactivated-account placeholders ("Instagram User", reddit deleted_user_room) merge many people.
 Retrieval result (needle test, 325 queries): Qwen3-Embedding-8B + FTS5 hybrid (RRF), no reranker →
 R@1 0.88, R@10 0.98. Vectors in processed_data/index/emb_qwen3-embedding-8b_ctx.npy (1024-token inputs).
-Next: search API on a GPU box, agent with citations, viewer chat + fly-to-citation.
+8. Search API + agent (DONE 2026-10-01, commit c983992): `scripts/api/server.py` (+ `run.sh`), `agent.py`.
+   Query vectors from `scripts/index/embed_server.py` on a vast GPU (SSH tunnel). Agent = DeepSeek v4-pro
+   (thinking) with search/read/person_overview/find_person/run_sql tools, [n] citations -> message ids + P_/T_ nodes.
+   Evals (`agent_eval.py`, LLM judge): basic set 94% correct, 100% abstention, 0 invalid cites; hard set 85%.
+   Verifier and multi-agent "deep research" exist but are opt-in: no measured gain at 2-8x latency/tokens.
+Next: viewer chat panel + fly-to-citation; stats card; demo prep.
 
 ## Phases
 0. Housekeeping (TODO): pyproject/uv, dotenv, .env key mismatch, stale docs, run order (export before layout).

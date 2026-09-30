@@ -67,7 +67,7 @@ HARD = [
     (24, "cross", "On which platforms did I talk about FIITJEE, and what did I say?",
      ["Reddit (the most)", "Twitter", "Instagram", "Discord", "lost ~1.5 lakh / FIR / refund"], False),
     (25, "compare", "Do I talk more with Gareth or datavorous?",
-     ["datavorous more", "~15k messages with datavorous vs ~8.6k with Gareth"], False),
+     ["datavorous more", "roughly 13-15k messages with datavorous (depending on counting DMs only or all shared chats) vs ~8.6k with Gareth"], False),
     (26, "multihop", "Who warned me that the Zimaboard deal might be a scam?", ["FireRoz"], False),
     (27, "multihop", "The kid I interviewed for a moderator role — how long did we keep talking after that?",
      ["quazarblaster", "from May 2025 until about Aug 2025", "roughly 470 messages"], False),
@@ -75,6 +75,26 @@ HARD = [
     (29, "abstain", "What did datavorous say about my Japan trip?", [], True),
     (30, "person", "Tell me about my friendship with Porkifiable.",
      ["mostly on Discord, thousands of messages", "money / crypto transfers", "buying hardware (ZimaBoard) for you"], False),
+]
+
+TEMPORAL = [
+    (31, "when", "When did I first talk to datavorous?", ["24 Dec 2024"], False),
+    (32, "timeofday", "What time of day am I usually most active?", ["around 9 PM IST", "evenings/late night (8-11 PM)"], False),
+    (33, "timeofday", "Do Gareth and I chat late at night?",
+     ["yes", "roughly 30% of messages between midnight and 5 AM IST"], False),
+    (34, "window", "Who did I talk to the most in March 2025?",
+     ["Lux or anubis among named people (~750 messages each)"], False),
+    (35, "window", "Which month of 2025 was I most active on Instagram?", ["March 2025"], False),
+    (36, "when", "When did I stop talking to Harsh, and how long did we chat?",
+     ["last messages around 8 Nov 2025", "started around Aug 2025", "about 2,200 messages"], False),
+    (37, "relative", "What was I up to last month?", [], True),   # archive ends 24 Jan 2026; today is later
+    (38, "when", "When did I lose my Mettle bottle?", ["in August 2024 (lost around early Aug; posted about it on 13 Aug 2024)"], False),
+    (39, "order", "Which came first: the Zimaboard purchase or my X99 server build?",
+     ["Zimaboard first (Sep 2024)", "X99 build later (Nov-Dec 2024)"], False),
+    (40, "life", "When was I in class 11?", ["the 2024-25 school year", "e.g. said he was a class 11 student in Sep 2024"], False),
+    (41, "when", "When did Azman leave for Patna?", ["around 19 Jun 2024"], False),
+    (42, "window", "What was I doing around New Year 2025?",
+     ["describes at least two real, dated things from late Dec 2024 - early Jan 2025 (e.g. X99 server in customs, FIITJEE, chats)"], False),
 ]
 
 JUDGE = """You grade an AI memory assistant's answer about a user's chat archive.
@@ -109,7 +129,8 @@ def post(api, q, verify=False, multi=True, timeout=900):
 
 
 def source_text(api, s):
-    url = f"{api}/api/session/{s['session_id']}" if s["kind"] == "conversation" else f"{api}/api/chunk/{s['chunk_id']}"
+    full = s["kind"] == "conversation" or s.get("read_full")
+    url = f"{api}/api/session/{s['session_id']}" if full else f"{api}/api/chunk/{s['chunk_id']}"
     with urllib.request.urlopen(url, timeout=60) as r:
         d = json.load(r)
     return f"[{s['n']}] {d['header']}\n{d['text'][:12000]}"
@@ -123,7 +144,7 @@ def judge(client, case, res, api):
             src += (f"\n\n[sql] {x['tool']} {json.dumps(x['args'], ensure_ascii=False)}\n-> "
                     f"{json.dumps(x['result'], ensure_ascii=False)[:3000]}")
     r = client.chat.completions.create(
-        model="deepseek-v4-pro", response_format={"type": "json_object"}, max_tokens=16000,
+        model="deepseek-flash", response_format={"type": "json_object"}, max_tokens=16000,
         messages=[{"role": "user", "content": JUDGE.format(q=q, facts=json.dumps(facts), abstain=abstain,
                                                            answer=res["answer"], sources=src)}])
     return json.loads(r.choices[0].message.content)
@@ -131,14 +152,14 @@ def judge(client, case, res, api):
 
 def main(a):
     client = OpenAI(api_key=dotenv_values(REPO / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
-    pool = {"basic": CASES, "hard": HARD, "all": CASES + HARD}[a.set]
+    pool = {"basic": CASES, "hard": HARD, "temporal": TEMPORAL, "all": CASES + HARD + TEMPORAL}[a.set]
     cases = [c for c in pool if not a.only or c[0] in {int(x) for x in a.only.split(",")}]
     OUT.mkdir(parents=True, exist_ok=True)
 
     def run(case):
         t0 = time.time()
         try:
-            res = post(a.api, case[2], verify=a.verify, multi=not a.single)
+            res = post(a.api, case[2], verify=a.verify, multi=a.multi)
         except Exception as e:
             return case, None, {"error": str(e)}, time.time() - t0
         try:
@@ -163,7 +184,7 @@ def main(a):
                    "pii_leak": bool(j.get("pii_leak")), "id": cid, "type": typ, "correct": correct, "unsupported": len(unsup), "claims": j.get("claims_checked"),
                    "abstain_ok": abstain_ok, "invalid_cites": len(res["invalid_citations"]),
                    "sources": len(res["sources"]), "tools": len(res["steps"]), "seconds": res["seconds"],
-                   "tokens_in": res["tokens"]["in"], "unsupported_claims": unsup, "notes": j.get("notes"),
+                   "tokens_in": res["tokens"]["in"], "tokens_cached": res["tokens"].get("cached", 0), "unsupported_claims": unsup, "notes": j.get("notes"),
                    "answer": res["answer"], "question": q}
             rows.append(row)
             c = f"{correct:.2f}" if correct is not None else "  - "
@@ -182,6 +203,7 @@ def main(a):
         "pii_leaks": sum(r["pii_leak"] for r in ok),
         "median_seconds": sorted(r["seconds"] for r in ok)[len(ok) // 2] if ok else None,
         "mean_tokens_in": int(sum(r["tokens_in"] for r in ok) / max(len(ok), 1)),
+        "cache_hit_share": round(sum(r.get("tokens_cached", 0) for r in ok) / max(sum(r["tokens_in"] for r in ok), 1), 2),
     }
     print("\nSUMMARY", json.dumps(summary, indent=1))
     with open(OUT / f"{a.tag}.json", "w") as f:
@@ -195,6 +217,6 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="baseline")
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--verify", action="store_true")
-    ap.add_argument("--set", choices=["basic", "hard", "all"], default="basic")
-    ap.add_argument("--single", action="store_true", help="disable the planner / multi-agent path")
+    ap.add_argument("--set", choices=["basic", "hard", "temporal", "all"], default="basic")
+    ap.add_argument("--multi", action="store_true", help="enable the planner / multi-agent 'deep research' path")
     main(ap.parse_args())

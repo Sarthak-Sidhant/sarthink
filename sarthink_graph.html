@@ -645,6 +645,74 @@
     #tooltip.show {
       opacity: 1;
     }
+
+    /* ── Ask-your-memory chat ─────────────────────────────────────────────── */
+    #chat {
+      position: fixed; right: 16px; top: 64px; bottom: 16px; width: min(440px, calc(100vw - 32px));
+      display: flex; flex-direction: column; background: var(--gb); border: 1px solid var(--bdr);
+      border-radius: 14px; backdrop-filter: blur(14px); z-index: 150; overflow: hidden;
+      transition: transform .35s ease, opacity .35s ease;
+    }
+    #chat.collapsed { transform: translateX(calc(100% + 24px)); opacity: 0; pointer-events: none; }
+    #chat-toggle {
+      position: fixed; right: 16px; bottom: 16px; z-index: 151; padding: 10px 16px; border-radius: 999px;
+      border: 1px solid var(--bdr); background: var(--acc); color: #fff; font: 600 .8rem 'Outfit', sans-serif;
+      cursor: pointer; display: none;
+    }
+    #chat.collapsed ~ #chat-toggle { display: block; }
+    .chat-hd { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--bdr); }
+    .chat-hd .t { font: 700 .72rem 'Orbitron', sans-serif; letter-spacing: .12em; color: var(--mid); flex: 1; }
+    .chat-hd button, .chat-row button {
+      background: transparent; border: 1px solid var(--bdr); color: var(--mid); border-radius: 8px;
+      padding: 4px 9px; font: 500 .72rem 'Outfit', sans-serif; cursor: pointer;
+    }
+    .chat-hd button:hover, .chat-row button:hover { color: #fff; border-color: rgba(255,255,255,.25); }
+    #chat-log { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+    .msg { font-size: .86rem; line-height: 1.5; }
+    .msg.user { align-self: flex-end; background: rgba(79,142,255,.18); border: 1px solid rgba(79,142,255,.35);
+      padding: 8px 12px; border-radius: 12px 12px 2px 12px; max-width: 88%; }
+    .msg.bot { color: #e6e6f0; }
+    .msg.bot p { margin: 0 0 8px; }
+    .msg.bot ul, .msg.bot ol { margin: 0 0 8px 18px; }
+    .msg.bot h3, .msg.bot h4 { font-size: .9rem; margin: 10px 0 6px; color: #fff; }
+    .msg.bot table { border-collapse: collapse; margin: 6px 0 10px; font-size: .78rem; width: 100%; }
+    .msg.bot td, .msg.bot th { border: 1px solid var(--bdr); padding: 3px 6px; text-align: left; }
+    .msg.bot code { background: rgba(255,255,255,.08); padding: 0 4px; border-radius: 4px; }
+    .msg.hint { color: var(--dim); font-size: .78rem; }
+    .cite { display: inline-block; min-width: 18px; padding: 0 5px; margin: 0 1px; border-radius: 6px; cursor: pointer;
+      background: rgba(79,142,255,.22); color: #cfe0ff; font-size: .7rem; font-weight: 600; text-align: center;
+      vertical-align: 1px; }
+    .cite:hover, .cite.on { background: var(--acc); color: #fff; }
+    .srcs { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .src { font-size: .74rem; color: var(--mid); cursor: pointer; padding: 5px 8px; border-radius: 8px;
+      border: 1px solid transparent; }
+    .src:hover, .src.on { border-color: var(--bdr); background: rgba(255,255,255,.04); color: #fff; }
+    .src b { color: #cfe0ff; margin-right: 6px; }
+    .src .d { color: var(--dim); margin-left: 6px; }
+    .src .sn { display: none; margin-top: 4px; color: var(--mid); }
+    .src.on .sn { display: block; }
+    .src .open { margin-top: 6px; display: none; }
+    .src.on .open { display: inline-block; }
+    .meta-line { font-size: .68rem; color: var(--dim); margin-top: 6px; }
+    .chat-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--bdr); align-items: flex-end; }
+    #chat-in { flex: 1; resize: none; background: rgba(255,255,255,.05); border: 1px solid var(--bdr); border-radius: 10px;
+      color: #fff; font: .86rem 'Outfit', sans-serif; padding: 9px 11px; max-height: 120px; outline: none; }
+    #chat-in:focus { border-color: rgba(79,142,255,.6); }
+    #chat-send { background: var(--acc) !important; color: #fff !important; border: none !important; padding: 9px 14px !important; }
+    .deep { font-size: .7rem; color: var(--dim); display: flex; align-items: center; gap: 4px; padding: 0 14px 10px; }
+    .suggest { display: flex; flex-wrap: wrap; gap: 6px; }
+    .suggest span { font-size: .74rem; padding: 5px 9px; border: 1px solid var(--bdr); border-radius: 999px; cursor: pointer;
+      color: var(--mid); }
+    .suggest span:hover { color: #fff; border-color: rgba(79,142,255,.6); }
+    #convo { position: fixed; inset: 8vh 20vw; background: var(--gb); border: 1px solid var(--bdr); border-radius: 14px;
+      z-index: 300; display: none; flex-direction: column; backdrop-filter: blur(16px); }
+    #convo.show { display: flex; }
+    #convo .hd { padding: 12px 16px; border-bottom: 1px solid var(--bdr); display: flex; gap: 10px; align-items: center; }
+    #convo .hd .t { flex: 1; font-size: .85rem; color: #fff; }
+    #convo pre { flex: 1; overflow: auto; margin: 0; padding: 14px 16px; white-space: pre-wrap; font: .8rem/1.55 'Outfit', sans-serif;
+      color: #dde; }
+    #convo .sum { padding: 10px 16px; font-size: .78rem; color: var(--mid); border-bottom: 1px solid var(--bdr); }
+    @media (max-width: 700px) { #convo { inset: 4vh 4vw; } }
   </style>
 </head>
 
@@ -695,6 +763,38 @@
 
     <!-- Hover tooltip -->
     <div id="tooltip"></div>
+  </div>
+
+  <!-- Ask your memory -->
+  <div id="chat">
+    <div class="chat-hd">
+      <div class="t">ASK YOUR MEMORY</div>
+      <button onclick="clearChatHighlight()" title="Show the whole graph again">Reset view</button>
+      <button onclick="toggleChat()" title="Hide">✕</button>
+    </div>
+    <div id="chat-log">
+      <div class="msg hint">Ask anything about your chats. Every answer cites the messages it comes from, and the graph
+        lights up the people and conversations involved.</div>
+      <div class="suggest" id="suggest">
+        <span>What do Gareth and I usually talk about?</span>
+        <span>Who did I talk to the most in March 2025?</span>
+        <span>What was the Zimaboard purchase and who was involved?</span>
+        <span>When am I most active during the day?</span>
+      </div>
+    </div>
+    <label class="deep"><input type="checkbox" id="chat-deep"> Deep research (slower, more thorough)</label>
+    <div class="chat-row">
+      <textarea id="chat-in" rows="1" placeholder="Ask your memory…"></textarea>
+      <button id="chat-send" onclick="sendChat()">Ask</button>
+    </div>
+  </div>
+  <button id="chat-toggle" onclick="toggleChat()">Ask your memory</button>
+
+  <!-- Full conversation viewer -->
+  <div id="convo">
+    <div class="hd"><div class="t" id="convo-t">—</div><button class="btn" onclick="closeConvo()">Close</button></div>
+    <div class="sum" id="convo-sum"></div>
+    <pre id="convo-text"></pre>
   </div>
 
   <script type="module">
@@ -1141,8 +1241,8 @@
     // ─── 2D / 3D toggle ──────────────────────────────────────────────────────────
     function toggleDim() {
       S.is3D = !S.is3D;
-      $('btn-dim').textContent = S.is3D ? '⬡ 2D' : '⬡ 3D';
-      $('btn-orbit').style.display = S.is3D ? '' : 'none';
+      if ($('btn-dim')) $('btn-dim').textContent = S.is3D ? '⬡ 2D' : '⬡ 3D';
+      if ($('btn-orbit')) $('btn-orbit').style.display = S.is3D ? '' : 'none';
       if (!S.is3D) {
         stopOrbit();
         // Flatten z in position buffer so 2D is truly flat
@@ -1162,8 +1262,8 @@
 
     // ─── Orbit ────────────────────────────────────────────────────────────────────
     function toggleOrbit() { S.orbit ? stopOrbit() : startOrbit(); }
-    function startOrbit() { S.orbit = true; $('btn-orbit').classList.add('on'); }
-    function stopOrbit() { S.orbit = false; $('btn-orbit').classList.remove('on'); }
+    function startOrbit() { S.orbit = true; $('btn-orbit')?.classList.add('on'); }
+    function stopOrbit() { S.orbit = false; $('btn-orbit')?.classList.remove('on'); }
 
     // ─── Group Panel ──────────────────────────────────────────────────────────────
     function buildGroups() {
@@ -1618,12 +1718,17 @@
 
       S.currentSearchIdx = -1;
       const N = S.nodes.length;
+      // prefer people (and exact names) over thread titles; any platform
+      let best = -1, bestScore = -1;
       for (let i = 0; i < N; i++) {
-        if (S.nodes[i].label.toLowerCase().includes(q) && (S.nodes[i].group || '').toLowerCase().includes('twitter')) {
-          S.currentSearchIdx = i;
-          break;
-        }
+        const n = S.nodes[i], label = n.label.toLowerCase();
+        if (!label.includes(q)) continue;
+        const person = n.group === 'me' || n.group.endsWith('_user');
+        const score = (person ? 2 : 0) + (label === q || label === '@' + q || label === 'u/' + q ? 4 : 0)
+                      + Math.log10((parseInt(n.size) || 1) + 1) / 10;
+        if (score > bestScore) { bestScore = score; best = i; }
       }
+      S.currentSearchIdx = best;
 
       if (S.currentSearchIdx >= 0) {
         const n = S.nodes[S.currentSearchIdx];
@@ -1698,6 +1803,204 @@
       $('stats').innerHTML = `${nNodes.toLocaleString()} nodes &nbsp;·&nbsp; ${nEdges.toLocaleString()} edges<br>${Object.keys(S.meta).length} groups`;
     }
 
+    // ─── Ask your memory (chat + graph highlighting) ────────────────────────────
+    const CHAT = { history: [], busy: false, lastNodes: null };
+
+    const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+    function inlineMd(s) {
+      return s
+        .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+        .replace(/(^|[\s(])\*(?!\s)(.+?)\*(?=[\s).,;:!?]|$)/g, '$1<i>$2</i>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\[(\d+)\]/g, '<span class="cite" data-n="$1">$1</span>')
+        .replace(/\[sql\]/gi, '<span class="cite" title="computed from your message database">db</span>');
+    }
+
+    // Small markdown renderer: headers, bullets, numbered lists, tables, paragraphs (input is escaped first).
+    function renderMd(text) {
+      const lines = esc(text || '').split('\n');
+      let html = '', list = null, table = [];
+      const flushList = () => { if (list) { html += `</${list}>`; list = null; } };
+      const flushTable = () => {
+        if (!table.length) return;
+        html += '<table>' + table.map((r, i) => {
+          const cells = r.replace(/^\||\|$/g, '').split('|').map(c => inlineMd(c.trim()));
+          const tag = i === 0 ? 'th' : 'td';
+          return '<tr>' + cells.map(c => `<${tag}>${c}</${tag}>`).join('') + '</tr>';
+        }).join('') + '</table>';
+        table = [];
+      };
+      for (const raw of lines) {
+        const line = raw.trimEnd();
+        if (/^\s*\|/.test(line)) { flushList(); if (!/^\s*\|?[\s:|-]+\|?\s*$/.test(line) || !line.includes('-')) table.push(line.trim()); continue; }
+        flushTable();
+        let m;
+        if ((m = line.match(/^#{1,4}\s+(.*)/))) { flushList(); html += `<h3>${inlineMd(m[1])}</h3>`; }
+        else if ((m = line.match(/^\s*[-*•]\s+(.*)/))) { if (list !== 'ul') { flushList(); html += '<ul>'; list = 'ul'; } html += `<li>${inlineMd(m[1])}</li>`; }
+        else if ((m = line.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== 'ol') { flushList(); html += '<ol>'; list = 'ol'; } html += `<li>${inlineMd(m[1])}</li>`; }
+        else if (!line.trim()) { flushList(); }
+        else if (/^-{3,}$/.test(line.trim())) { flushList(); }
+        else { flushList(); html += `<p>${inlineMd(line)}</p>`; }
+      }
+      flushList(); flushTable();
+      return html;
+    }
+
+    function addMsg(cls, html) {
+      const d = document.createElement('div');
+      d.className = 'msg ' + cls;
+      d.innerHTML = html;
+      $('chat-log').appendChild(d);
+      $('chat-log').scrollTop = $('chat-log').scrollHeight;
+      return d;
+    }
+
+    // Light up a set of graph nodes (cited people + conversations), draw their links, frame them with the camera.
+    function highlightNodes(nodeIds, { fly = true } = {}) {
+      if (S.searchIsolated) restoreSearchLayout();
+      const me = S.nodes.find(n => n.group === 'me');
+      const idxs = new Set();
+      nodeIds.forEach(id => { const n = S.nodeById[id]; if (n && n.index !== undefined) idxs.add(n.index); });
+      if (!idxs.size) return;
+      if (me) idxs.add(me.index);
+      S.search = '__chat__';
+      S.currentSearchSet = idxs;
+      refreshColors();
+
+      clearRelations();
+      const pos = [], colors = [];
+      idxs.forEach(i => {
+        const n = S.nodes[i];
+        (S.adj[n.id] || []).forEach(t => {
+          const nb = S.nodeById[t];
+          if (!nb || !idxs.has(nb.index) || n.id > t) return;
+          const a = new THREE.Color(n.color || '#4488ff'), b = new THREE.Color(nb.color || '#4488ff');
+          pos.push(+n.layout_x, +n.layout_y, +n.layout_z, +nb.layout_x, +nb.layout_y, +nb.layout_z);
+          colors.push(a.r, a.g, a.b, b.r, b.g, b.b);
+        });
+      });
+      if (pos.length) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        S.relLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+          vertexColors: true, opacity: 0.9, transparent: true, blending: THREE.AdditiveBlending }));
+        S.scene.add(S.relLines);
+      }
+      if (fly && S.is3D) {
+        // frame the cited nodes (excluding "me" at the origin unless it is all we have)
+        const pts = [...idxs].filter(i => !me || i !== me.index || idxs.size === 1).map(i => S.nodes[i]);
+        const c = new THREE.Vector3();
+        pts.forEach(n => c.add(new THREE.Vector3(+n.layout_x, +n.layout_y, +n.layout_z)));
+        c.divideScalar(pts.length);
+        let r = 0;
+        pts.forEach(n => { r = Math.max(r, c.distanceTo(new THREE.Vector3(+n.layout_x, +n.layout_y, +n.layout_z))); });
+        let dir = S.camera3.position.clone().sub(S.controls.target).normalize();
+        if (dir.lengthSq() < 0.01) dir.set(0, 0, 1);
+        S.targetCamLook = c.clone();
+        S.targetCamPos = c.clone().add(dir.multiplyScalar(Math.max(700, r * 2.6)));
+        stopOrbit();
+      }
+    }
+
+    function clearChatHighlight() {
+      S.search = ''; S.currentSearchSet = null; CHAT.lastNodes = null;
+      clearRelations(); refreshColors();
+      document.querySelectorAll('.cite.on, .src.on').forEach(e => e.classList.remove('on'));
+      S.targetCamLook = new THREE.Vector3(0, 0, 0);
+      S.targetCamPos = S.camera3.position.clone().normalize().multiplyScalar(9000);
+    }
+
+    function focusSource(box, n) {
+      const src = box._sources.find(s => s.n === +n);
+      if (!src) return;
+      box.querySelectorAll('.cite, .src').forEach(e => e.classList.toggle('on', e.dataset.n === String(n)));
+      highlightNodes(src.nodes);
+      const el = box.querySelector(`.src[data-n="${n}"]`);
+      if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
+    async function openConvo(sessionId) {
+      $('convo-t').textContent = 'Loading…'; $('convo-sum').textContent = ''; $('convo-text').textContent = '';
+      $('convo').classList.add('show');
+      try {
+        const s = await (await fetch(`/api/session/${encodeURIComponent(sessionId)}`)).json();
+        $('convo-t').textContent = s.header;
+        $('convo-sum').textContent = (s.summary && s.summary.summary) ? 'AI summary: ' + s.summary.summary : '';
+        $('convo-text').textContent = s.text;
+        highlightNodes(s.nodes);
+      } catch (e) { $('convo-t').textContent = 'Could not load the conversation: ' + e.message; }
+    }
+    function closeConvo() { $('convo').classList.remove('show'); }
+
+    function renderAnswer(box, d) {
+      box._sources = d.sources || [];
+      const srcHtml = box._sources.map(s => `
+        <div class="src" data-n="${s.n}">
+          <b>[${s.n}]</b>${esc(s.header)}<span class="d">${esc(s.date)}</span>
+          <div class="sn">${esc(s.snippet || '')}</div>
+          <button class="btn open" data-session="${esc(s.session_id)}">Open conversation</button>
+        </div>`).join('');
+      const tools = (d.steps || []).filter(x => !['plan', 'verify'].includes(x.tool)).length;
+      box.innerHTML = renderMd(d.answer) +
+        (srcHtml ? `<div class="srcs">${srcHtml}</div>` : '') +
+        `<div class="meta-line">${d.mode === 'multi' ? 'deep research · ' : ''}${tools} lookups · ${d.seconds}s</div>`;
+      box.addEventListener('click', e => {
+        const open = e.target.closest('.open');
+        if (open) { e.stopPropagation(); openConvo(open.dataset.session); return; }
+        const t = e.target.closest('[data-n]');
+        if (t) focusSource(box, t.dataset.n);
+      });
+      const all = [...new Set(box._sources.flatMap(s => s.nodes))];
+      CHAT.lastNodes = all;
+      if (all.length) highlightNodes(all);
+    }
+
+    async function sendChat(text) {
+      const q = (text || $('chat-in').value).trim();
+      if (!q || CHAT.busy) return;
+      CHAT.busy = true;
+      $('chat-in').value = '';
+      const sug = $('suggest'); if (sug) sug.remove();
+      addMsg('user', esc(q));
+      const box = addMsg('bot', '<span class="msg hint">Searching your memory… 0s</span>');
+      const t0 = Date.now();
+      const timer = setInterval(() => {
+        const s = Math.round((Date.now() - t0) / 1000);
+        const phase = s < 6 ? 'Searching your memory' : s < 20 ? 'Reading conversations' : 'Putting the answer together';
+        box.innerHTML = `<span class="msg hint">${phase}… ${s}s</span>`;
+      }, 1000);
+      try {
+        const r = await fetch('/api/ask', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ question: q, history: CHAT.history.slice(-6), multi: $('chat-deep').checked }),
+        });
+        if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
+        const d = await r.json();
+        clearInterval(timer);
+        renderAnswer(box, d);
+        CHAT.history.push({ role: 'user', content: q }, { role: 'assistant', content: d.answer });
+      } catch (e) {
+        clearInterval(timer);
+        box.innerHTML = `<span style="color:#ff8080">Something went wrong: ${esc(e.message)}</span>`;
+      } finally {
+        CHAT.busy = false;
+        $('chat-log').scrollTop = $('chat-log').scrollHeight;
+      }
+    }
+
+    function toggleChat() { $('chat').classList.toggle('collapsed'); }
+
+    function initChat() {
+      $('chat-in').addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+      });
+      $('chat-in').addEventListener('input', e => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; });
+      const sug = $('suggest');
+      if (sug) sug.addEventListener('click', e => { if (e.target.tagName === 'SPAN') sendChat(e.target.textContent); });
+    }
+
     // ─── Boot ─────────────────────────────────────────────────────────────────────
     async function boot() {
       lbar(8, 'Loading nodes…');
@@ -1746,8 +2049,10 @@
       Object.assign(window, {
         toggleOrbit, toggleDim, toggleRecord, toggleCycle,
         showAll, hideAll, onSearch, onDepthChange, shift, setSpeed, clickGroup,
-        startRecord, stopRecord, closeRecModal
+        startRecord, stopRecord, closeRecModal,
+        sendChat, toggleChat, clearChatHighlight, closeConvo
       });
+      initChat();
 
       lbar(100, 'Ready');
       $('loading').classList.add('fade');

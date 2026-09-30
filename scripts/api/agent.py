@@ -31,7 +31,9 @@ SYSTEM = """You are Sarthink, the private memory of Sarthak Sidhant. Your knowle
 302k messages across Twitter/X, Reddit, Discord, Instagram and Facebook (2011 to early 2026). You answer his
 questions about his own life, conversations and people, speaking to him as "you".
 
-Today is {today}. Times are shown in IST.
+Today is {today}. Message timestamps and dates in tool results are IST (Sarthak's timezone). The short AI
+summaries/context lines were written from UTC times, so for late-night messages their dates can be a day off:
+when they disagree, trust the message timestamps.
 
 How to work:
 - Always look things up with tools before answering; never answer from general knowledge.
@@ -45,7 +47,15 @@ How to work:
   stopped, activity over time. Never estimate numbers from search results.
 - For questions about a relationship or a person in general, start with person_overview, then read a few of
   the example conversations it gives for the themes you mention. Its numbers are exact; cite them as [sql].
+- Use topic_timeline for "when" questions about a topic; then read the example excerpts it returns.
 - Use find_person when a name is ambiguous or you need someone's person_id.
+- Pass `alternatives` to search_memory for vague questions (other phrasings, Hinglish, his own words).
+- Questions like "what did X need help with / work on / talk about" can match many episodes: call
+  person_overview for X first to see the range of themes, then search within the likely ones, so you do not
+  lock onto the first match.
+- If the evidence shows several DIFFERENT episodes that fit the question and it does not ask for all of them,
+  answer the most likely one and briefly list the others (one line each with date and citation), asking
+  which one he meant.
 
 How to answer:
 - Every factual claim must cite its source with [n], using the numbers shown in tool results. SQL results
@@ -55,7 +65,8 @@ How to answer:
 - If the evidence is weak, partial or conflicting, say so plainly. If nothing relevant is found after a
   few searches, say you could not find it — never guess or invent.
 - When several conversations are relevant, summarise across them rather than picking one.
-- Cite individual numbers like [3] or [3][5]; never ranges.
+- Cite individual numbers like [3] or [3][5]; never ranges. Never show internal ids (person_id, session_id,
+  chunk/msg ids, P_/T_ node ids) in the answer.
 - Privacy: never repeat phone numbers, email addresses, street addresses, passwords, OTPs, bank/card/ID numbers, order/tracking numbers
   or similar personal identifiers — even Sarthak's own — unless he explicitly asks for that exact detail.
   Say "your address" / "an email" instead.
@@ -68,6 +79,9 @@ TOOLS = [
                        "platform, participants and a session_id for read_conversation.",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "what to look for; short and specific works best"},
+            "alternatives": {"type": "array", "items": {"type": "string"},
+                             "description": "up to 3 other phrasings (e.g. Hinglish, synonyms, how Sarthak would "
+                                            "have written it); results of all phrasings are merged"},
             "person": {"type": "string", "description": "only chats with this person (name or P_<id>)"},
             "platform": {"type": "string", "enum": ["twitter", "reddit", "discord", "instagram", "facebook"]},
             "since": {"type": "string", "description": "YYYY-MM-DD"},
@@ -91,6 +105,17 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {
             "person": {"type": "string", "description": "name or P_<id>"}}, "required": ["person"]}}},
     {"type": "function", "function": {
+        "name": "topic_timeline",
+        "description": "WHEN was something talked about: month-by-month counts of the most relevant excerpts for "
+                       "a topic (semantic + keyword), plus the best excerpt from each of the busiest months as "
+                       "numbered sources. Use for 'when was I into X', 'when did X start/stop', 'how did X evolve'. "
+                       "Counts are of top matches, not exact totals — use run_sql for exact keyword counts.",
+        "parameters": {"type": "object", "properties": {
+            "topic": {"type": "string"},
+            "person": {"type": "string"}, "platform": {"type": "string"},
+            "since": {"type": "string"}, "until": {"type": "string"}, "me_only": {"type": "boolean"},
+        }, "required": ["topic"]}}},
+    {"type": "function", "function": {
         "name": "find_person",
         "description": "Find people by (partial) name; returns person_id, platform and message count.",
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
@@ -106,7 +131,8 @@ TOOLS = [
             "  SELECT o.person, COUNT(*) n FROM messages o JOIN threads t USING(thread_id) WHERE t.is_dm=1 "
             "AND o.is_me=0 AND o.thread_id IN (SELECT thread_id FROM messages WHERE is_me=1) "
             "GROUP BY o.person_id ORDER BY n DESC LIMIT 10\n"
-            f"Results are capped at {SQL_ROW_LIMIT} rows; long text is truncated."),
+            f"Results are capped at {SQL_ROW_LIMIT} rows; long text is truncated. Include msg_id in the SELECT when "
+            "you list individual messages: each such row then gets a citable source number [n]."),
         "parameters": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}},
 ]
 
@@ -318,6 +344,10 @@ Sarthak using ONLY facts in the briefs and database results, keeping their [n] c
 across briefs; cite [sql] for database numbers). Merge overlapping facts, resolve contradictions by saying
 so, lead with the direct answer, and keep it concise. If the briefs found nothing relevant, say so plainly."""
 
+FINAL_NUDGE = ("You have used your tool budget. Do not call any more tools. Answer now using only what you "
+               "have already found, with [n] citations; say clearly what you could not find.")
+TOOLCALL_TEXT = re.compile(r"(<[｜|]\s*(DSML|tool[_▁ ]?call)|<\s*/?\s*function_calls?\s*>|^\s*\{\s*\"(sql|query|session_id|topic|person)\"\s*:)", re.I | re.M)
+
 VERIFY = """You are the fact-checker for a personal-memory assistant. Below is a DRAFT answer to the user's
 question and ALL the sources the assistant read, numbered [n]. Produce the final answer.
 
@@ -361,14 +391,16 @@ class Agent:
 
     # ---- verifier ----------------------------------------------------------------------------
     @staticmethod
-    def _source_text(s):
-        body = s["text"] if s["kind"] == "conversation" else s["text"]
+    def _source_text(s, full=None):
+        body = (full or s)["text"]
         return f"[{s['n_']}] {s['header']} ({fmt_date(s['start'])})\n{body[:9000]}"
 
     def _verify(self, question, draft, sources, trace, usage):
         if not sources or not draft:
             return draft, []
-        blocks = [self._source_text({**s, "n_": n}) for n, s in sources.items()]
+        read = {s["session_id"]: s for s in sources.values() if s["kind"] == "conversation"}
+        blocks = [self._source_text({**s, "n_": n}, read.get(s["session_id"]) if s["kind"] == "excerpt" else None)
+                  for n, s in sources.items()]
         sql = [f"[sql] {x['tool']} {json.dumps(x['args'], ensure_ascii=False)}\n-> "
                f"{json.dumps(x.get('result'), ensure_ascii=False)[:3000]}"
                for x in trace if x["tool"] in ("run_sql", "person_overview") and x.get("result")]
@@ -398,13 +430,23 @@ class Agent:
             sources[n] = {"key": key, **payload}
             return n
 
-    def _search(self, sources, query, k=8, **filters):
+    def _search(self, sources, query, k=8, alternatives=None, **filters):
         k = max(1, min(int(k or 8), 15))
         filters = {f: v for f, v in filters.items() if v not in (None, "")}
+        phrasings = [query] + [a for a in (alternatives or []) if isinstance(a, str) and a.strip()][:3]
         try:
-            hits = self.backend.search(query, k, **filters)
+            ranked = [self.backend.search(p, k, **filters) for p in phrasings]
         except Exception as e:
             return {"error": str(e)[:300]}
+        if len(ranked) == 1:
+            hits = ranked[0]
+        else:                                             # reciprocal-rank fusion across phrasings
+            score, by_id = {}, {}
+            for lst in ranked:
+                for rank, h in enumerate(lst):
+                    score[h["chunk_id"]] = score.get(h["chunk_id"], 0) + 1 / (60 + rank)
+                    by_id[h["chunk_id"]] = h
+            hits = [by_id[c] for c in sorted(score, key=lambda c: -score[c])[:k]]
         out = []
         for h in hits:
             n = self._register(sources, ("chunk", h["chunk_id"]), {"kind": "excerpt", **h})
@@ -455,6 +497,36 @@ class Agent:
                                   "sessions": t["sessions"], "examples": examples})
         return out
 
+    def _cite_rows(self, sources, res):
+        """Rows that carry a msg_id become citable: register the chunk containing that message."""
+        i = res["columns"].index("msg_id")
+        res["columns"] = ["n"] + res["columns"]
+        rows = []
+        for row in res["rows"][:25]:
+            n = None
+            try:
+                ch = self.backend.chunk_for_message(row[i])
+                if ch:
+                    n = self._register(sources, ("chunk", ch["chunk_id"]), {"kind": "excerpt", **ch})
+            except Exception:
+                pass
+            rows.append([n] + list(row))
+        res["rows"] = rows + [[None] + list(r) for r in res["rows"][25:]]
+        return res
+
+    def _timeline(self, sources, topic, **filters):
+        filters = {f: v for f, v in filters.items() if v not in (None, "")}
+        try:
+            t = self.backend.timeline(topic, **filters)
+        except Exception as e:
+            return {"error": str(e)[:300]}
+        examples = {}
+        for month, h in t["examples"].items():
+            n = self._register(sources, ("chunk", h["chunk_id"]), {"kind": "excerpt", **h})
+            examples[month] = {"n": n, "where": h["header"], "excerpt": h["text"][:400]}
+        return {"months": t["months"], "busiest": t["busiest"], "examples": examples,
+                "note": "counts are of the top ~120 matches, a relative signal, not exact totals"}
+
     def _call(self, name, args, sources, trace, label=None):
         t0 = time.time()
         if name == "search_memory":
@@ -467,12 +539,16 @@ class Agent:
             res = {"candidates": self.backend.person(args.get("name", ""))[:8]}
         elif name == "run_sql":
             res = self.sql.run(args.get("sql", ""))
+            if "rows" in res and "msg_id" in res["columns"]:
+                res = self._cite_rows(sources, res)
+        elif name == "topic_timeline":
+            res = self._timeline(sources, **args)
         else:
             res = {"error": f"unknown tool {name}"}
         entry = {"tool": name, "args": args, "ms": int((time.time() - t0) * 1000),
                  "error": res.get("error") if isinstance(res, dict) else None, "by": label or "agent"}
         if name == "run_sql" and "rows" in res:
-            entry["result"] = {"columns": res["columns"], "rows": res["rows"][:15]}
+            entry["result"] = {"columns": res["columns"], "rows": res["rows"][:40]}
         if name == "person_overview" and "error" not in res:
             entry["result"] = {k: v for k, v in res.items() if k != "themes"} | {
                 "themes": [{k: t[k] for k in ("theme", "description", "sessions")} for t in res.get("themes", [])]}
@@ -485,12 +561,15 @@ class Agent:
         extra = None if self.thinking else {"thinking": {"type": "disabled"}}
         for step in range(max_steps + 1):
             final_round = step == max_steps
+            if final_round:
+                messages.append({"role": "user", "content": FINAL_NUDGE})
             r = self.client.chat.completions.create(
                 model=model or self.model, messages=messages, tools=TOOLS, extra_body=extra, max_tokens=8000,
                 tool_choice="none" if final_round else "auto")
             with self._lock:
                 usage["in"] += r.usage.prompt_tokens
                 usage["out"] += r.usage.completion_tokens
+                usage["cached"] = usage.get("cached", 0) + (getattr(r.usage, "prompt_cache_hit_tokens", 0) or 0)
             m = r.choices[0].message
             msg = {"role": "assistant", "content": m.content or ""}
             rc = getattr(m, "reasoning_content", None)
@@ -509,7 +588,16 @@ class Agent:
                     messages.append({"role": "tool", "tool_call_id": tc.id,
                                      "content": self._call(tc.function.name, args, sources, trace, label)})
                 continue
-            return m.content or ""
+            text = m.content or ""
+            if final_round and TOOLCALL_TEXT.search(text):   # model wrote a tool call as text: ask once more
+                messages.append({"role": "assistant", "content": text})
+                messages.append({"role": "user", "content": FINAL_NUDGE + " Plain prose only."})
+                r = self.client.chat.completions.create(
+                    model=model or self.model, messages=messages, extra_body=extra, max_tokens=8000)
+                text = r.choices[0].message.content or ""
+                if TOOLCALL_TEXT.search(text):
+                    text = ""
+            return text
         return ""
 
     # ---- multi-agent: planner -> parallel researchers -> writer -------------------------------
@@ -582,15 +670,21 @@ class Agent:
         nums = cited_numbers(answer)
         cited = sorted(n for n in nums if n in sources)
         bad = sorted(n for n in nums if n not in sources and n < 1000)   # [2020] is a year, not a cite
+        read = {s["session_id"]: s for s in sources.values() if s["kind"] == "conversation"}
         out_sources = []
         for n in cited:
             s = sources[n]
+            full = read.get(s["session_id"]) if s["kind"] == "excerpt" else None
+            # an excerpt whose whole conversation was read: the answer may quote anywhere in that conversation
             out_sources.append({
-                "n": n, "kind": s["kind"], "header": s["header"], "platform": s["platform"],
+                "n": n, "kind": s["kind"], "read_full": bool(full) or s["kind"] == "conversation",
+                "header": s["header"], "platform": s["platform"],
                 "date": fmt_date(s["start"]), "session_id": s["session_id"], "chunk_id": s.get("chunk_id"),
                 "snippet": ((s.get("summary") or {}).get("summary") if s["kind"] == "conversation"
                             else s.get("context")) or s["text"][:300],
-                "nodes": s["nodes"], "message_ids": s.get("message_ids", []),
+                "nodes": sorted(set(s["nodes"]) | set((full or {}).get("nodes", []))),
+                "message_ids": (full or s).get("message_ids", []),
+                "excerpt_message_ids": s.get("message_ids", []) if full else None,
                 "people": s.get("people", []),
             })
         return {"question": question, "answer": answer, "mode": mode, "plan": plan,

@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -53,8 +54,34 @@ def locked(fn):
     return wrapper
 
 
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+LINE_TS = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\]")
+HEADER_DATE = re.compile(r"^\d{1,2} \w{3} \d{4}( – \d{1,2} \w{3} \d{4})?$")
+
+
 def iso(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat() if ts else None
+
+
+def ist_text(text):
+    """Chunk/session text stores message times in UTC; show them in IST (Sarthak's timezone).
+    Converted at serve time so stored text and embeddings stay unchanged."""
+    def conv(m):
+        t = dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=dt.timezone.utc)
+        return "[" + t.astimezone(IST).strftime("%Y-%m-%d %H:%M") + "]"
+    return LINE_TS.sub(conv, text or "")
+
+
+def ist_header(header, start_ts, end_ts):
+    """Replace the UTC date segment of a header ('... · 12 Mar 2023 · ...') with IST dates."""
+    fmt = lambda ts: dt.datetime.fromtimestamp(ts, IST).strftime("%-d %b %Y")  # noqa: E731
+    when = fmt(start_ts) if fmt(start_ts) == fmt(end_ts) else f"{fmt(start_ts)} – {fmt(end_ts)}"
+    parts = header.split(" · ")
+    for i, part in enumerate(parts):
+        if HEADER_DATE.match(part.strip()):
+            parts[i] = when
+            break
+    return " · ".join(parts)
 
 
 def to_ts(date_str, end=False):
@@ -62,7 +89,7 @@ def to_ts(date_str, end=False):
         return None
     d = dt.datetime.fromisoformat(date_str)
     if d.tzinfo is None:
-        d = d.replace(tzinfo=dt.timezone.utc)
+        d = d.replace(tzinfo=IST)      # dates the user/agent types are IST days
     if end and len(date_str) <= 10:
         d += dt.timedelta(days=1)
     return int(d.timestamp())
@@ -104,7 +131,8 @@ def chunk_payload(cid, score=None):
         "SELECT msg_id FROM ChunkMessages WHERE chunk_id = ? ORDER BY position", (cid,))]
     return {
         "chunk_id": cid, "score": score, "session_id": r["session_id"], "platform": r["platform"],
-        "header": r["header"], "context": r["context"], "text": r["text"],
+        "header": ist_header(r["header"], r["start_ts"], r["end_ts"]), "context": r["context"],
+        "text": ist_text(r["text"]),
         "start": iso(r["start_ts"]), "end": iso(r["end_ts"]), "me_involved": bool(r["me_involved"]),
         "people": [{"node": f"P_{p}", "name": NAMES.get(p, "?")} for p in persons],
         "nodes": [f"P_{p}" for p in persons] + [f"T_{t}" for t in threads],
@@ -164,7 +192,8 @@ def session(session_id: str):
         SELECT cm.msg_id FROM ChunkMessages cm JOIN Chunks c USING(chunk_id)
         WHERE c.session_id = ? GROUP BY cm.msg_id ORDER BY MIN(c.start_ts), MIN(cm.position)""", (session_id,))]
     return {
-        "session_id": session_id, "platform": r["platform"], "header": r["header"], "text": r["text"],
+        "session_id": session_id, "platform": r["platform"],
+        "header": ist_header(r["header"], r["start_ts"], r["end_ts"]), "text": ist_text(r["text"]),
         "message_ids": msgs,
         "start": iso(r["start_ts"]), "end": iso(r["end_ts"]), "message_count": r["message_count"],
         "summary": json.loads(summ["data"]) if summ else None,
@@ -193,6 +222,30 @@ class _Backend:
 
     def person(self, name):
         return person(name)["candidates"]
+
+    def chunk_for_message(self, msg_id):
+        with LOCK:
+            r = S.conn.execute("SELECT chunk_id FROM ChunkMessages WHERE msg_id = ? LIMIT 1", (msg_id,)).fetchone()
+            return chunk_payload(r[0]) if r else None
+
+    def timeline(self, q, k=120, **filters):
+        """Month histogram of the top-k hybrid matches for a topic (IST months) + the best hit per busy month."""
+        f = dict(platform=filters.get("platform"), person_id=resolve_person(filters.get("person")),
+                 since=to_ts(filters.get("since")), until=to_ts(filters.get("until"), end=True),
+                 me_only=bool(filters.get("me_only")))
+        with LOCK:
+            hits = S.search(q, k=k, mode="hybrid", **f)
+            months, best = {}, {}
+            for rank, (cid, score) in enumerate(hits):
+                i = S.row.get(cid)
+                if i is None:
+                    continue
+                m = dt.datetime.fromtimestamp(int(S.start_ts[i]), IST).strftime("%Y-%m")
+                months[m] = months.get(m, 0) + 1
+                best.setdefault(m, cid)           # hits are ranked, so the first per month is its best
+            top = sorted(months, key=lambda m: -months[m])[:4]
+            return {"months": dict(sorted(months.items())), "busiest": top,
+                    "examples": {m: chunk_payload(best[m]) for m in top}}
 
 
 AGENT = None
