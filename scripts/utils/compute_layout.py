@@ -197,6 +197,97 @@ def compute_galaxy_layout(nodes: list[dict]) -> dict[str, tuple]:
                 
     return positions
 
+# ─── Relational "me-centred" layout ───────────────────────────────────────────
+
+R_IN = 250      # radius of my closest people
+R_OUT = 5200    # outer shell: people I barely interacted with
+PLATFORM_OFFSET = 5000  # push each platform's cloud this far out along its axis, to separate clusters
+PLATFORM_CONE = {'twitter': 62, 'reddit': 50, 'instagram': 38, 'discord': 30, 'facebook': 26}  # cap half-angle, degrees
+
+
+def _unit(v):
+    n = math.sqrt(sum(c * c for c in v)) or 1.0
+    return tuple(c / n for c in v)
+
+
+def _cap_direction(axis, half_angle_deg, rng):
+    """Uniform random direction inside a spherical cap around `axis`."""
+    cos_max = math.cos(math.radians(half_angle_deg))
+    z = rng.uniform(cos_max, 1.0)
+    phi = rng.uniform(0, 2 * math.pi)
+    s = math.sqrt(max(0.0, 1 - z * z))
+    local = (s * math.cos(phi), s * math.sin(phi), z)
+    # rotate local (around +z) onto axis
+    ax = _unit(axis)
+    helper = (1.0, 0.0, 0.0) if abs(ax[0]) < 0.9 else (0.0, 1.0, 0.0)
+    u = _unit((ax[1] * helper[2] - ax[2] * helper[1], ax[2] * helper[0] - ax[0] * helper[2],
+               ax[0] * helper[1] - ax[1] * helper[0]))
+    v = (ax[1] * u[2] - ax[2] * u[1], ax[2] * u[0] - ax[0] * u[2], ax[0] * u[1] - ax[1] * u[0])
+    return tuple(local[0] * u[i] + local[1] * v[i] + local[2] * ax[i] for i in range(3))
+
+
+def compute_relational_layout(nodes: list[dict], edges: list[dict]) -> dict[str, tuple]:
+    """Me at the origin; people at a distance set by how much we talked (closer = more), in a
+    per-platform sector; each thread at the message-weighted centroid of its participants."""
+    rng = random.Random(42)
+    by_id = {n['id']: n for n in nodes}
+    me = next(n['id'] for n in nodes if n['group'] == 'me')
+
+    members = {}                                  # thread -> {person: weight}
+    for e in edges:
+        members.setdefault(e['target'], {})[e['source']] = int(e['weight'])
+
+    closeness = {}
+    for t, ps in members.items():
+        if me not in ps:
+            continue
+        for p, w in ps.items():
+            if p != me:
+                closeness[p] = closeness.get(p, 0) + w + ps[me]
+    cmax = max(closeness.values()) if closeness else 1
+
+    platforms = [p for p in PLATFORM_ORDER if any(n['group'].startswith(p) for n in nodes)]
+    axes = dict(zip(platforms, fibonacci_3d(len(platforms), 1.0)))
+
+    pos = {me: (0.0, 0.0, 0.0)}
+    for n in nodes:
+        if n['id'] == me or not n['id'].startswith('P_'):
+            continue
+        plat = get_platform(n['group'])
+        c = closeness.get(n['id'], 0)
+        r = R_IN + (R_OUT - R_IN) * (1 - math.log1p(c) / math.log1p(cmax)) if c else R_OUT * 1.08
+        r *= rng.uniform(0.94, 1.06)
+        d = _cap_direction(axes[plat], PLATFORM_CONE.get(plat, 40), rng)
+        a = axes[plat]
+        pos[n['id']] = tuple(d[i] * r + a[i] * PLATFORM_OFFSET for i in range(3))
+
+    for n in nodes:
+        tid = n['id']
+        if not tid.startswith('T_'):
+            continue
+        ps = members.get(tid, {})
+        others = {p: w for p, w in ps.items() if p != me}
+        plat = get_platform(n['group'])
+        if not others:                            # my solo posts: an even-density cloud in the platform's sector
+            r = R_IN * 1.3 + R_OUT * 0.4 * rng.random() ** (1 / 3)   # cube root -> uniform volume density
+            d = _cap_direction(axes[plat], PLATFORM_CONE.get(plat, 40), rng)
+            a = axes[plat]
+            pos[tid] = tuple(d[i] * r + a[i] * PLATFORM_OFFSET * 0.6 for i in range(3))
+            continue
+        tot = sum(ps.values())
+        cx = sum(pos[p][0] * w for p, w in ps.items() if p in pos) / tot
+        cy = sum(pos[p][1] * w for p, w in ps.items() if p in pos) / tot
+        cz = sum(pos[p][2] * w for p, w in ps.items() if p in pos) / tot
+        j = 12 + 0.035 * math.sqrt(cx * cx + cy * cy + cz * cz)
+        pos[tid] = (cx + rng.gauss(0, j), cy + rng.gauss(0, j), cz + rng.gauss(0, j))
+
+    missing = [n['id'] for n in nodes if n['id'] not in pos]
+    for nid in missing:                           # defensive: anything unplaced goes to the outer shell
+        d = fibonacci_3d(1, 1.0)[0]
+        pos[nid] = (d[0] * R_OUT, d[1] * R_OUT, d[2] * R_OUT)
+    return pos
+
+
 # ─── legacy bucket helper (kept for igraph path) ─────────────────────────────
 def _bucket_by_platform(nodes):
     """Bucket nodes by platform → {group → [node]}
@@ -315,9 +406,13 @@ def main():
     print(f"  {len(edges)} edges")
 
     # ── Step 1: fast galaxy seed ──────────────────────────────────────────────
-    print("Computing galaxy layout (fast seed)…")
     t0 = time.time()
-    positions = compute_galaxy_layout(nodes)
+    if any(n['group'] == 'me' for n in nodes):
+        print("Computing me-centred relational layout…")
+        positions = compute_relational_layout(nodes, edges)
+    else:
+        print("Computing galaxy layout (fast seed)…")
+        positions = compute_galaxy_layout(nodes)
     print(f"  Done in {time.time() - t0:.2f}s  ({len(positions)} nodes positioned)")
 
     # ── Step 2: optional igraph refinement ───────────────────────────────────
