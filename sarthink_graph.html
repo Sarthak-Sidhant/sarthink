@@ -1964,20 +1964,58 @@
       $('chat-in').value = '';
       const sug = $('suggest'); if (sug) sug.remove();
       addMsg('user', esc(q));
-      const box = addMsg('bot', '<span class="msg hint">Searching your memory… 0s</span>');
+      const box = addMsg('bot', '');
       const t0 = Date.now();
-      const timer = setInterval(() => {
+      const steps = [];
+      const seen = new Set();
+      const paint = () => {
         const s = Math.round((Date.now() - t0) / 1000);
-        const phase = s < 6 ? 'Searching your memory' : s < 20 ? 'Reading conversations' : 'Putting the answer together';
-        box.innerHTML = `<span class="msg hint">${phase}… ${s}s</span>`;
-      }, 1000);
+        const last = steps.slice(-5).map((t, i, a) =>
+          `<div style="opacity:${i === a.length - 1 ? 1 : .45}">${esc(t)}</div>`).join('');
+        box.innerHTML = `<div class="msg hint">${last || 'Thinking…'}<div style="margin-top:4px">${s}s</div></div>`;
+        $('chat-log').scrollTop = $('chat-log').scrollHeight;
+      };
+      paint();
+      const timer = setInterval(paint, 1000);
       try {
-        const r = await fetch('/api/ask', {
+        const r = await fetch('/api/ask_stream', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ question: q, history: CHAT.history.slice(-6), multi: $('chat-deep').checked }),
         });
-        if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
-        const d = await r.json();
+        if (r.status === 404 || r.status === 405) {             // older server without streaming
+          const r2 = await fetch('/api/ask', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ question: q, history: CHAT.history.slice(-6), multi: $('chat-deep').checked }),
+          });
+          if (!r2.ok) throw new Error(`${r2.status} ${(await r2.text()).slice(0, 200)}`);
+          const d2 = await r2.json();
+          clearInterval(timer); renderAnswer(box, d2);
+          CHAT.history.push({ role: 'user', content: q }, { role: 'assistant', content: d2.answer });
+          return;
+        }
+        if (!r.ok || !r.body) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
+        const reader = r.body.getReader(), dec = new TextDecoder();
+        let buf = '', d = null;
+        while (!d) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let cut;
+          while ((cut = buf.indexOf('\n\n')) >= 0) {
+            const chunk = buf.slice(0, cut); buf = buf.slice(cut + 2);
+            const line = chunk.split('\n').find(l => l.startsWith('data: '));
+            if (!line) continue;
+            const ev = JSON.parse(line.slice(6));
+            if (ev.type === 'step') {
+              steps.push(ev.text);
+              (ev.nodes || []).forEach(n => seen.add(n));
+              if (seen.size) highlightNodes([...seen], { fly: false });   // the graph "remembers" as it reads
+              paint();
+            } else if (ev.type === 'answer') { d = ev.data; }
+            else if (ev.type === 'error') { throw new Error(ev.message); }
+          }
+        }
+        if (!d) throw new Error('the answer stream ended early');
         clearInterval(timer);
         renderAnswer(box, d);
         CHAT.history.push({ role: 'user', content: q }, { role: 'assistant', content: d.answer });

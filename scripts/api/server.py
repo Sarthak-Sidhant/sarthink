@@ -25,7 +25,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -256,7 +256,7 @@ class AskRequest(BaseModel):
     history: list[dict] = []
     model: str = "deepseek-v4-pro"
     thinking: bool = True
-    verify: bool = False   # optional "verified" mode: fact-checks citations (~+10-40s)
+    verify: bool = True    # fact-check pass: unsupported claims 7.8% -> 4.0% on the eval, ~+9s median
     multi: bool = False    # "deep research": planner splits broad questions across parallel researchers (~2 min, ~10x tokens)
 
 
@@ -268,6 +268,37 @@ def ask(req: AskRequest):
         AGENT = Agent(_Backend(), model=req.model, thinking=req.thinking, verify=req.verify)
         AGENT.key = key
     return AGENT.ask(req.question, req.history, multi=req.multi)
+
+
+@app.post("/api/ask_stream")
+def ask_stream(req: AskRequest):
+    """Server-sent events: {"type":"step",...} progress lines while the agent works, then {"type":"answer",...}."""
+    import queue
+    global AGENT
+    key = (req.model, req.thinking, req.verify)
+    if AGENT is None or AGENT.key != key:
+        AGENT = Agent(_Backend(), model=req.model, thinking=req.thinking, verify=req.verify)
+        AGENT.key = key
+    q = queue.Queue()
+
+    def work():
+        try:
+            res = AGENT.ask(req.question, req.history, multi=req.multi, emit=q.put)
+            q.put({"type": "answer", "data": res})
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)[:300]})
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def events():
+        while True:
+            ev = q.get()
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            if ev["type"] in ("answer", "error"):
+                break
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/")

@@ -308,6 +308,40 @@ class PersonProfiles:
                 "sessions_summarized": len(sessions), "themes": themes}
 
 
+class Trace(list):
+    """Per-question tool trace that also carries an optional progress callback (for streaming UIs)."""
+
+    def __init__(self, emit=None):
+        super().__init__()
+        self.emit_fn = emit
+
+    def emit(self, **event):
+        if self.emit_fn:
+            try:
+                self.emit_fn(event)
+            except Exception:
+                pass
+
+
+def describe(name, args, res):
+    """Human-readable progress line (+ graph nodes to light up) for a tool call."""
+    who = f" with {args['person']}" if args.get("person") else ""
+    if name == "search_memory":
+        nodes = [n for r in (res.get("results") or [])[:3] for n in r.get("nodes", [])] if isinstance(res, dict) else []
+        return f"🔎 Searching “{args.get('query', '')}”{who}", nodes
+    if name == "read_conversation":
+        return f"📖 Reading: {res.get('where', 'a conversation')}", res.get("nodes", [])
+    if name == "person_overview":
+        return f"👤 Looking at your history with {args.get('person', '…')}", []
+    if name == "topic_timeline":
+        return f"📅 Mapping when you talked about “{args.get('topic', '')}”{who}", []
+    if name == "run_sql":
+        return "🧮 Crunching numbers in your message database", []
+    if name == "find_person":
+        return f"👤 Looking up “{args.get('name', '')}”", []
+    return f"⚙️ {name}", []
+
+
 PLANNER = """You plan research for a personal-memory assistant over Sarthak's chat archive (Twitter, Reddit,
 Discord, Instagram, Facebook; 2011-2026). Today is {today}.
 
@@ -451,7 +485,8 @@ class Agent:
         for h in hits:
             n = self._register(sources, ("chunk", h["chunk_id"]), {"kind": "excerpt", **h})
             out.append({"n": n, "date": fmt_date(h["start"]), "platform": h["platform"], "where": h["header"],
-                        "summary": h.get("context"), "excerpt": h["text"][:700], "session_id": h["session_id"]})
+                        "summary": h.get("context"), "excerpt": h["text"][:700], "session_id": h["session_id"],
+                        "nodes": h["nodes"]})
         return {"results": out} if out else {"results": [], "note": "nothing found; try other words or filters"}
 
     def _read(self, sources, session_id, limit=9000):
@@ -465,7 +500,7 @@ class Agent:
         if len(text) > limit:
             text, note = text[:limit], "truncated; the rest continues in next_session or later messages"
         summ = (s.get("summary") or {}).get("summary")
-        return {"n": n, "where": s["header"], "from": fmt_date(s["start"]), "to": fmt_date(s["end"]),
+        return {"n": n, "where": s["header"], "nodes": s["nodes"], "from": fmt_date(s["start"]), "to": fmt_date(s["end"]),
                 "summary": summ, "messages": text, "note": note,
                 "previous_session": s.get("previous_session"), "next_session": s.get("next_session")}
 
@@ -553,6 +588,13 @@ class Agent:
             entry["result"] = {k: v for k, v in res.items() if k != "themes"} | {
                 "themes": [{k: t[k] for k in ("theme", "description", "sessions")} for t in res.get("themes", [])]}
         trace.append(entry)
+        if isinstance(trace, Trace) and isinstance(res, dict) and "error" not in res:
+            text, nodes = describe(name, args, res)
+            trace.emit(type="step", text=text, nodes=nodes, by=label or "agent")
+        if isinstance(res, dict):                     # graph node ids are for the UI only, not the model
+            res.pop("nodes", None)
+            for r in res.get("results", []) if isinstance(res.get("results"), list) else []:
+                r.pop("nodes", None)
         return json.dumps(res, ensure_ascii=False)
 
     # ---- loop --------------------------------------------------------------------------------
@@ -640,10 +682,12 @@ class Agent:
             usage["out"] += r.usage.completion_tokens
         return r.choices[0].message.content or ""
 
-    def ask(self, question, history=None, multi=True):
+    def ask(self, question, history=None, multi=True, emit=None):
         t_start = time.time()
         today = dt.datetime.now(IST).strftime("%d %b %Y")
-        sources, trace, usage = {}, [], {"in": 0, "out": 0}
+        sources, trace, usage = {}, Trace(emit), {"in": 0, "out": 0}
+        if multi and not history:
+            trace.emit(type="step", text="🧭 Planning the research", nodes=[])
         plan = self._plan(question, today, usage) if multi and not history else {"type": "simple", "tasks": []}
         trace.append({"tool": "plan", "args": {"type": plan["type"], "tasks": [t["goal"] for t in plan["tasks"]]},
                       "ms": int((time.time() - t_start) * 1000), "error": None})
@@ -652,6 +696,7 @@ class Agent:
             with cf.ThreadPoolExecutor(len(plan["tasks"])) as ex:
                 futs = [ex.submit(self._research, question, t, today, sources, trace, usage) for t in plan["tasks"]]
                 briefs = [(t["goal"], f.result()) for t, f in zip(plan["tasks"], futs)]
+            trace.emit(type="step", text="✍️ Writing the answer from all findings", nodes=[])
             answer = self._write(question, today, briefs, trace, usage)
             mode = "multi"
         else:
@@ -664,6 +709,7 @@ class Agent:
 
         draft, changes = answer, []
         if self.verify:
+            trace.emit(type="step", text="✅ Double-checking every citation", nodes=[])
             answer, changes = self._verify(question, draft, sources, trace, usage)
 
         answer = redact(answer)
