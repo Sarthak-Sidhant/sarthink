@@ -65,10 +65,14 @@ How to answer:
 - If the evidence is weak, partial or conflicting, say so plainly. If nothing relevant is found after a
   few searches, say you could not find it — never guess or invent.
 - When several conversations are relevant, summarise across them rather than picking one.
+- Notes: tool results may include `your_notes` — things Sarthak asked you to remember. Treat them as true and
+  more authoritative than the chats; cite them as [note]. If a note contradicts the archive, say so.
+- Pronouns: use a person's pronouns only if a note or the chats clearly state them; otherwise use "they".
 - Cite individual numbers like [3] or [3][5]; never ranges. Never show internal ids (person_id, session_id,
   chunk/msg ids, P_/T_ node ids) in the answer.
 - Privacy: never repeat phone numbers, email addresses, street addresses, passwords, OTPs, bank/card/ID numbers, order/tracking numbers
   or similar personal identifiers — even Sarthak's own — unless he explicitly asks for that exact detail.
+  This includes apartment/building, street and locality names: say "your address" instead.
   Say "your address" / "an email" instead.
 - Be concise: a short direct answer first, then supporting details. Markdown is fine."""
 
@@ -115,6 +119,26 @@ TOOLS = [
             "person": {"type": "string"}, "platform": {"type": "string"},
             "since": {"type": "string"}, "until": {"type": "string"}, "me_only": {"type": "boolean"},
         }, "required": ["topic"]}}},
+    {"type": "function", "function": {
+        "name": "remember",
+        "description": "Save something Sarthak EXPLICITLY asks you to remember (\"remember that…\", \"note that…\", "
+                       "\"FYI X is…\"): a fact about a person (pronouns, who they are, a correction) or context about "
+                       "a topic/place/project. Never save anything he did not ask you to save.",
+        "parameters": {"type": "object", "properties": {
+            "note": {"type": "string", "description": "the fact, as a short self-contained sentence"},
+            "person": {"type": "string", "description": "the person it is about, if any (name as he wrote it)"},
+            "topic": {"type": "string", "description": "the topic/context it is about, if not a person"},
+            "keywords": {"type": "array", "items": {"type": "string"},
+                         "description": "3-6 words that should bring this note back (names, aliases, related terms)"},
+        }, "required": ["note"]}}},
+    {"type": "function", "function": {
+        "name": "forget",
+        "description": "Remove saved notes when Sarthak asks you to forget/delete something he told you.",
+        "parameters": {"type": "object", "properties": {"about": {"type": "string"}}, "required": ["about"]}}},
+    {"type": "function", "function": {
+        "name": "list_notes",
+        "description": "List what Sarthak has asked you to remember (optionally about one person/topic).",
+        "parameters": {"type": "object", "properties": {"about": {"type": "string"}}}}},
     {"type": "function", "function": {
         "name": "find_person",
         "description": "Find people by (partial) name; returns person_id, platform and message count.",
@@ -308,12 +332,71 @@ class PersonProfiles:
                 "sessions_summarized": len(sessions), "themes": themes}
 
 
+NOTES_DB = REPO_ROOT / "processed_data" / "db" / "user_notes.db"
+
+
+class NotesStore:
+    """Things Sarthak explicitly asked Sarthink to remember. Person notes follow the person; topic notes surface
+    when one of their trigger keywords appears in the question, a search, or retrieved text. Nothing is put in
+    the system prompt."""
+
+    def __init__(self):
+        self.conn = sqlite3.connect(NOTES_DB, check_same_thread=False)
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS Notes (
+            note_id INTEGER PRIMARY KEY, person_id INTEGER, subject TEXT, keywords TEXT, text TEXT,
+            created_at TEXT, active INTEGER DEFAULT 1)""")
+        self.lock = threading.Lock()
+
+    def add(self, text, subject, person_id=None, keywords=()):
+        kws = sorted({k.strip().lower() for k in keywords if k and len(k.strip()) >= 3})
+        with self.lock:
+            cur = self.conn.execute(
+                "INSERT INTO Notes(person_id, subject, keywords, text, created_at) VALUES (?,?,?,?,?)",
+                (person_id, subject, json.dumps(kws), text, dt.datetime.now(IST).isoformat(timespec="minutes")))
+            self.conn.commit()
+            return cur.lastrowid
+
+    def _rows(self, where="", args=()):
+        with self.lock:
+            rows = self.conn.execute(f"SELECT note_id, person_id, subject, keywords, text, created_at FROM Notes "
+                                     f"WHERE active=1 {where}", args).fetchall()
+        return [{"note_id": r[0], "person_id": r[1], "subject": r[2], "keywords": json.loads(r[3] or "[]"),
+                 "text": r[4], "saved": r[5]} for r in rows]
+
+    def for_persons(self, pids):
+        pids = [int(p) for p in pids if str(p).isdigit()]
+        if not pids:
+            return []
+        return self._rows(f"AND person_id IN ({','.join('?' * len(pids))})", tuple(pids))
+
+    def for_text(self, text):
+        """Notes whose subject or keywords occur in the text (word-boundary match)."""
+        t = f" {re.sub(r'[^a-z0-9]+', ' ', (text or '').lower())} "
+        out = []
+        for n in self._rows():
+            keys = n["keywords"] + [re.sub(r"[^a-z0-9]+", " ", n["subject"].lower()).strip()]
+            if any(k and f" {re.sub(r'[^a-z0-9]+', ' ', k).strip()} " in t for k in keys):
+                out.append(n)
+        return out
+
+    def search(self, about):
+        a = (about or "").lower()
+        return [n for n in self._rows() if not a or a in n["subject"].lower() or a in n["text"].lower()
+                or any(a in k for k in n["keywords"])]
+
+    def deactivate(self, ids):
+        with self.lock:
+            self.conn.executemany("UPDATE Notes SET active=0 WHERE note_id=?", [(i,) for i in ids])
+            self.conn.commit()
+
+
 class Trace(list):
     """Per-question tool trace that also carries an optional progress callback (for streaming UIs)."""
 
     def __init__(self, emit=None):
         super().__init__()
         self.emit_fn = emit
+        self.notes_shown = {}          # note_id -> note, shown to the model during this question
 
     def emit(self, **event):
         if self.emit_fn:
@@ -339,6 +422,10 @@ def describe(name, args, res):
         return "🧮 Crunching numbers in your message database", []
     if name == "find_person":
         return f"👤 Looking up “{args.get('name', '')}”", []
+    if name == "remember":
+        return f"📝 Remembering: {args.get('note', '')}", []
+    if name == "forget":
+        return f"🗑️ Forgetting notes about {args.get('about', '')}", []
     return f"⚙️ {name}", []
 
 
@@ -422,6 +509,7 @@ class Agent:
         self.profiles = PersonProfiles(self.sql, self.client)
         self._lock = threading.RLock()
         self.research_model = "deepseek-v4-pro"   # flash researchers were cheaper but measurably worse
+        self.notes = NotesStore()
 
     # ---- verifier ----------------------------------------------------------------------------
     @staticmethod
@@ -438,6 +526,7 @@ class Agent:
         sql = [f"[sql] {x['tool']} {json.dumps(x['args'], ensure_ascii=False)}\n-> "
                f"{json.dumps(x.get('result'), ensure_ascii=False)[:3000]}"
                for x in trace if x["tool"] in ("run_sql", "person_overview") and x.get("result")]
+        sql += [f"[note] about {n['subject']}: {n['text']}" for n in getattr(trace, "notes_shown", {}).values()]
         t0 = time.time()
         r = self.client.chat.completions.create(
             model=self.verify_model, response_format={"type": "json_object"}, max_tokens=16000,
@@ -532,6 +621,54 @@ class Agent:
                                   "sessions": t["sessions"], "examples": examples})
         return out
 
+    def _remember(self, note, person=None, topic=None, keywords=None):
+        pid, subject = None, topic or "general"
+        if person:
+            cands = self.backend.person(person)
+            if not cands:
+                return {"error": f"no person matching {person!r}; ask Sarthak which person he means"}
+            pid, subject = cands[0]["person_id"], cands[0]["name"]
+        kws = list(keywords or []) + ([person] if person else []) + ([topic] if topic else [])
+        nid = self.notes.add(note, subject, pid, kws)
+        return {"saved": True, "about": subject, "note": note, "id": nid}
+
+    def _attach_notes(self, name, args, res, trace):
+        """Add not-yet-shown relevant notes to a tool result: person notes for people in it, topic notes whose
+        keywords appear in the query or retrieved text."""
+        if not isinstance(res, dict) or "error" in res or name in ("remember", "forget", "list_notes"):
+            return
+        pids, text = set(), " ".join(str(v) for v in args.values())
+        for r in res.get("results", []) if isinstance(res.get("results"), list) else []:
+            pids.update(n[2:] for n in r.get("nodes", []) if n.startswith("P_"))
+            text += " " + r.get("where", "") + " " + (r.get("excerpt") or "")[:400]
+        pids.update(n[2:] for n in res.get("nodes", []) if n.startswith("P_"))
+        if res.get("person_id"):
+            pids.add(str(res["person_id"]))
+        for c in res.get("candidates", []) if isinstance(res.get("candidates"), list) else []:
+            pids.add(str(c.get("person_id")))
+        text += " " + res.get("where", "") + " " + (res.get("messages") or "")[:2000]
+        fresh = [n for n in self.notes.for_persons(pids) + self.notes.for_text(text)
+                 if n["note_id"] not in trace.notes_shown]
+        if fresh:
+            for n in fresh:
+                trace.notes_shown[n["note_id"]] = n
+            res["your_notes"] = [{"about": n["subject"], "note": n["text"]} for n in fresh]
+
+    def _question_notes(self, question, trace):
+        found = [n for n in self.notes.for_text(question) if n["note_id"] not in trace.notes_shown]
+        # person notes whose person's name appears in the question
+        for n in self.notes._rows("AND person_id IS NOT NULL"):
+            first = re.sub(r"[^a-z0-9]+", " ", n["subject"].lower()).strip().split(" ")[0]
+            if first and len(first) >= 3 and re.search(rf"\b{re.escape(first)}\b", question.lower()) \
+                    and n["note_id"] not in trace.notes_shown and n not in found:
+                found.append(n)
+        for n in found:
+            trace.notes_shown[n["note_id"]] = n
+        if not found:
+            return ""
+        return "\n\n(Notes I asked you to remember that may be relevant:\n" + "\n".join(
+            f"- about {n['subject']}: {n['text']}" for n in found) + ")"
+
     def _cite_rows(self, sources, res):
         """Rows that carry a msg_id become citable: register the chunk containing that message."""
         i = res["columns"].index("msg_id")
@@ -570,6 +707,14 @@ class Agent:
             res = self._read(sources, args.get("session_id", ""), limit=6000 if label else 9000)
         elif name == "person_overview":
             res = self._overview(sources, args.get("person", ""))
+        elif name == "remember":
+            res = self._remember(**args)
+        elif name == "forget":
+            found = self.notes.search(args.get("about", ""))
+            self.notes.deactivate([n["note_id"] for n in found])
+            res = {"forgotten": [n["text"] for n in found]} if found else {"forgotten": [], "note": "no matching notes"}
+        elif name == "list_notes":
+            res = {"notes": [{k: n[k] for k in ("subject", "text", "saved")} for n in self.notes.search(args.get("about"))]}
         elif name == "find_person":
             res = {"candidates": self.backend.person(args.get("name", ""))[:8]}
         elif name == "run_sql":
@@ -588,6 +733,8 @@ class Agent:
             entry["result"] = {k: v for k, v in res.items() if k != "themes"} | {
                 "themes": [{k: t[k] for k in ("theme", "description", "sessions")} for t in res.get("themes", [])]}
         trace.append(entry)
+        if isinstance(trace, Trace):
+            self._attach_notes(name, args, res, trace)
         if isinstance(trace, Trace) and isinstance(res, dict) and "error" not in res:
             text, nodes = describe(name, args, res)
             trace.emit(type="step", text=text, nodes=nodes, by=label or "agent")
@@ -703,7 +850,7 @@ class Agent:
             messages = [{"role": "system", "content": SYSTEM.format(today=today)}]
             for turn in (history or [])[-6:]:
                 messages.append({"role": turn["role"], "content": turn["content"]})
-            messages.append({"role": "user", "content": question})
+            messages.append({"role": "user", "content": question + self._question_notes(question, trace)})
             answer = self._loop(messages, sources, trace, usage)
             mode = "single"
 

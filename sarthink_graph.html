@@ -1814,7 +1814,8 @@
         .replace(/(^|[\s(])\*(?!\s)(.+?)\*(?=[\s).,;:!?]|$)/g, '$1<i>$2</i>')
         .replace(/`([^`]+)`/g, '<code>$1</code>')
         .replace(/\[(\d+)\]/g, '<span class="cite" data-n="$1">$1</span>')
-        .replace(/\[sql\]/gi, '<span class="cite" title="computed from your message database">db</span>');
+        .replace(/\[sql\]/gi, '<span class="cite" title="computed from your message database">db</span>')
+        .replace(/\[note\]/gi, '<span class="cite" title="something you asked Sarthink to remember" style="background:rgba(255,213,74,.25);color:#ffe9a8">note</span>');
     }
 
     // Small markdown renderer: headers, bullets, numbered lists, tables, paragraphs (input is escaped first).
