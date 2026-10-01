@@ -50,7 +50,15 @@ R@1 0.88, R@10 0.98. Vectors in processed_data/index/emb_qwen3-embedding-8b_ctx.
    (thinking) with search/read/person_overview/find_person/run_sql tools, [n] citations -> message ids + P_/T_ nodes.
    Evals (`agent_eval.py`, LLM judge): basic set 94% correct, 100% abstention, 0 invalid cites; hard set 85%.
    Verifier and multi-agent "deep research" exist but are opt-in: no measured gain at 2-8x latency/tokens.
-Next: viewer chat panel + fly-to-citation; stats card; demo prep.
+9. Demo moments + second brain + judge readiness (DONE 2026-10-01):
+   - Viewer: chat with live progress (SSE), citations -> graph highlight + camera, numbers panel (SQL + chart),
+     person dossier on click, commitments inbox (+ .ics), on this day, cited day review, plain-language notes.
+   - Placeholder accounts split per chat with honest names; evidence-verified name guesses; approved merges
+     via person_merges.json.
+   - Agent eval: 92 questions, 90% facts found, 10/10 abstentions, 3% unsupported claims, notes 10/10.
+   - run.py --demo + fictional demo archive (demo/), CPU-only 0.6B search, works without an LLM key.
+Remaining: browser QA of the viewer panels, demo script + slides, optional re-run of the eval after the
+placeholder changes, more sources (WhatsApp, AI chats, journals) after the hackathon.
 
 ## Phases
 0. Housekeeping (TODO): pyproject/uv, dotenv, .env key mismatch, stale docs, run order (export before layout).
