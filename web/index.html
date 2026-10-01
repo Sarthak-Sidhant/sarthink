@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sarthink</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%232a78d6'/%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232a78d6' stroke-width='2' opacity='.4'/%3E%3C/svg%3E">
+  <script>try { const t = localStorage.getItem('sarthink.theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="#ask" aria-label="Sarthink home">
+      <span class="brand-mark" aria-hidden="true"></span>sarthink
+    </a>
+    <nav class="tabs" role="tablist">
+      <a href="#ask" data-view="ask" role="tab">Ask</a>
+      <a href="#reminders" data-view="reminders" role="tab">Reminders <span class="tab-count" id="rem-badge"></span></a>
+      <a href="#people" data-view="people" role="tab">People</a>
+    </nav>
+    <div class="top-right">
+      <span class="status" id="status" title="Backend status"><i></i><span>connecting…</span></span>
+      <button class="icon-btn" id="theme-btn" title="Toggle theme" aria-label="Toggle theme">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ─── Ask: chat left, graph + sources right ─────────────────────────────── -->
+    <section class="view view-ask" id="view-ask" hidden>
+      <div class="chat">
+        <div class="chat-log" id="chat-log">
+          <div class="empty" id="chat-empty">
+            <h1>Ask your memory</h1>
+            <p>Answers come from your own conversations, with every claim cited.</p>
+            <div class="suggest" id="suggest"></div>
+          </div>
+        </div>
+        <form class="composer" id="composer">
+          <textarea id="chat-in" rows="1" placeholder="Ask anything about your conversations…" autocomplete="off"></textarea>
+          <div class="composer-bar">
+            <label class="switch" title="Splits broad questions across parallel researchers (~2 min)">
+              <input type="checkbox" id="deep"><span class="track"></span>Deep research
+            </label>
+            <button type="button" class="ghost-btn" id="new-chat" title="Start a new conversation">New chat</button>
+            <button type="submit" class="send" id="send" aria-label="Send">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <aside class="side">
+        <div class="graph-pane" id="graph-pane">
+          <canvas id="graph"></canvas>
+          <div class="graph-tip" id="graph-tip" hidden></div>
+          <div class="graph-legend" id="graph-legend"></div>
+          <div class="graph-tools">
+            <span class="graph-info" id="graph-info">Loading graph…</span>
+            <button class="icon-btn sm" id="graph-clear" title="Clear highlight" hidden>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+            <button class="icon-btn sm" id="graph-fit" title="Fit to view">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="sources-pane" id="sources-pane">
+          <div class="pane-head">
+            <h2 id="sources-title">Sources</h2>
+            <span class="muted" id="sources-sub"></span>
+          </div>
+          <div class="pane-body" id="sources-body">
+            <p class="placeholder">Citations from the selected answer appear here. Click one to read the conversation.</p>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ─── Reminders (full screen) ───────────────────────────────────────────── -->
+    <section class="view view-reminders" id="view-reminders" hidden>
+      <div class="page">
+        <div class="page-head">
+          <div>
+            <h1>Reminders</h1>
+            <p class="muted" id="rem-sub">Promises and plans found in your conversations.</p>
+          </div>
+          <a class="ghost-btn" href="/api/commitments.ics" download title="Everything you added to the calendar, as an .ics file">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+            Export calendar
+          </a>
+        </div>
+        <div class="filters">
+          <div class="seg" id="rem-owner">
+            <button data-v="me" class="on">Mine</button><button data-v="them">Theirs</button><button data-v="all">All</button>
+          </div>
+          <div class="seg" id="rem-status">
+            <button data-v="open" class="on">Open</button><button data-v="calendar">In calendar</button><button data-v="done">Done</button><button data-v="dismissed">Dismissed</button>
+          </div>
+          <label class="search">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+            <input id="rem-q" type="search" placeholder="Filter reminders">
+          </label>
+        </div>
+        <div class="rem-layout">
+          <div class="rem-list" id="rem-list"></div>
+          <aside class="otd" id="otd">
+            <div class="otd-head">
+              <h2>On this day</h2>
+              <input type="date" id="otd-date" aria-label="Pick a day">
+            </div>
+            <div id="otd-body"></div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── People ────────────────────────────────────────────────────────────── -->
+    <section class="view view-people" id="view-people" hidden>
+      <div class="people-list">
+        <label class="search">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+          <input id="ppl-q" type="search" placeholder="Search people">
+        </label>
+        <div class="chips" id="ppl-platforms"></div>
+        <div class="ppl-items" id="ppl-items"><p class="placeholder">Loading people…</p></div>
+      </div>
+      <div class="person" id="person">
+        <div class="person-empty">
+          <h1>People</h1>
+          <p class="muted">Pick someone to see your history together: how much you talk, when, about what, and where.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Conversation reader (slide-over, used outside the Ask view) -->
+  <div class="drawer" id="drawer" hidden>
+    <div class="drawer-scrim" data-close></div>
+    <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="Conversation">
+      <div class="drawer-body" id="drawer-body"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
