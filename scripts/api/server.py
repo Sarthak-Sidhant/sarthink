@@ -453,6 +453,9 @@ def _relink():
     with _DOSSIER_LOCK:                   # cached dossiers of everyone whose accounts changed
         c = _dossier_db()
         c.executemany("DELETE FROM Dossiers WHERE person_id = ?", [(p,) for p in stale])
+        c.execute("CREATE TABLE IF NOT EXISTS Profiles (person_id INTEGER, version TEXT, data TEXT, "
+                  "PRIMARY KEY (person_id, version))")
+        c.executemany("DELETE FROM Profiles WHERE person_id = ?", [(p,) for p in stale])   # stats + themes
         c.commit()
         c.close()
     n = refresh_person_lists(S.conn)
@@ -480,6 +483,37 @@ class NameRequest(BaseModel):
 def _check_linkable(pid):
     if _person_row(pid)["is_me"]:
         raise HTTPException(400, "your own accounts come from identity_map.json, not contacts")
+
+
+@app.get("/api/contacts")
+@locked
+def contacts():
+    """Everyone the user linked into a contact (with their platforms), and all open same-person suggestions."""
+    out = []
+    for pid in sorted(set(CONTACTS.links().values())):
+        r = S.conn.execute("SELECT name, message_count FROM Persons WHERE person_id = ?", (pid,)).fetchone()
+        accts = accounts_of(S.conn, pid)
+        if r and accts:
+            out.append({"person_id": pid, "name": r["name"], "messages": r["message_count"], "accounts": len(accts),
+                        "platforms": sorted({a["platform"] for a in accts})})
+    seen, matches = set(), []
+    for (user_ids,) in S.conn.execute("SELECT user_ids FROM MergeCandidates"):
+        ids = json.loads(user_ids)
+        pids = sorted({r[0] for r in S.conn.execute(
+            f"SELECT person_id FROM PersonAliases WHERE user_id IN ({','.join('?' * len(ids))})", ids)} - {1})
+        for i, a in enumerate(pids):
+            for b in pids[i + 1:]:
+                if (a, b) in seen:
+                    continue
+                seen.add((a, b))
+                if CONTACTS.rejected([x["key"] for x in accounts_of(S.conn, a)], [x["key"] for x in accounts_of(S.conn, b)]):
+                    continue
+                pa, pb = (S.conn.execute("SELECT person_id, name, platform, message_count AS messages FROM Persons "
+                                         "WHERE person_id = ?", (p,)).fetchone() for p in (a, b))
+                if pa and pb:
+                    matches.append({"a": dict(pa), "b": dict(pb)})
+    matches.sort(key=lambda m: -(m["a"]["messages"] + m["b"]["messages"]))
+    return {"contacts": out, "matches": matches}
 
 
 @app.post("/api/person/{pid}/link")

@@ -14,6 +14,7 @@ const cachedNow = new Set();   // ids whose dossier promise has resolved (render
 export class People {
   constructor({ onAsk, onShowInGraph }) {
     this.all = []; this.q = ''; this.plat = null; this.current = null;
+    this.contacts = new Map(); this.matches = [];
     this.onAsk = onAsk; this.onShowInGraph = onShowInGraph;
     let t;
     $('ppl-q').addEventListener('input', e => { clearTimeout(t); t = setTimeout(() => { this.q = e.target.value.trim().toLowerCase(); this.renderList(); }, 120); });
@@ -23,7 +24,10 @@ export class People {
       this.plat = this.plat === b.dataset.p ? null : b.dataset.p;
       this.renderChips(); this.renderList();
     });
-    $('ppl-items').addEventListener('click', e => { const r = e.target.closest('.ppl'); if (r) location.hash = `#people/${r.dataset.pid}`; });
+    $('ppl-items').addEventListener('click', e => {
+      const r = e.target.closest('.ppl, .ppl-matches');
+      if (r) location.hash = `#people/${r.dataset.pid || 'matches'}`;
+    });
     $('person').addEventListener('click', e => this.onPersonClick(e));
     let ft;
     $('person').addEventListener('input', e => {
@@ -37,23 +41,43 @@ export class People {
   setPeople(list) {
     this.all = list;
     this.renderChips(); this.renderList();
+    this.loadContacts();
+  }
+
+  async loadContacts() {
+    try {
+      const c = await api('/api/contacts');
+      this.contacts = new Map(c.contacts.map(x => [x.person_id, x]));
+      this.matches = c.matches;
+    } catch { return; }
+    this.renderChips(); this.renderList();
+    if (this.current === 'matches') this.openMatches();
   }
 
   renderChips() {
     const counts = {};
     for (const p of this.all) counts[p.platform] = (counts[p.platform] || 0) + 1;
-    $('ppl-platforms').innerHTML = PLATFORMS.filter(p => counts[p.key]).map(p =>
+    $('ppl-platforms').innerHTML = (this.contacts.size ? `<button data-p="contacts" class="${this.plat === 'contacts' ? 'on' : ''}" title="People you linked across accounts">Contacts <span class="muted">${num(this.contacts.size)}</span></button>` : '') +
+      PLATFORMS.filter(p => counts[p.key]).map(p =>
       `<button data-p="${p.key}" class="${this.plat === p.key ? 'on' : ''}">${dot(p.key)}${esc(p.label)} <span class="muted">${num(counts[p.key])}</span></button>`).join('');
   }
 
   renderList() {
     const q = this.q;
-    const match = this.all.filter(p => (!this.plat || p.platform === this.plat || p.group === 'me') && (!q || p.name.toLowerCase().includes(q)));
+    const C = this.contacts;
+    const inPlat = p => !this.plat || p.group === 'me' || (this.plat === 'contacts' ? C.has(p.pid)
+      : p.platform === this.plat || C.get(p.pid)?.platforms.includes(this.plat));
+    const match = this.all.filter(p => inPlat(p) && (!q || p.name.toLowerCase().includes(q)));
     const items = match.slice(0, SHOW);
-    $('ppl-items').innerHTML = items.map(p => `
+    const where = p => { const c = C.get(p.pid); return c && c.platforms.length > 1
+      ? `${c.platforms.map(dot).join('')} ${c.accounts} accounts` : esc(platformLabel(p.platform)); };
+    const n = this.matches.length;
+    $('ppl-items').innerHTML = (n && !q ? `<div class="ppl-matches${this.current === 'matches' ? ' on' : ''}">
+        <b>${num(n)} possible match${n === 1 ? '' : 'es'}</b><span>Accounts that may be the same person: review</span></div>` : '') +
+      items.map(p => `
       <div class="ppl${this.current === p.pid ? ' on' : ''}" data-pid="${p.pid}">
         <span class="avatar" style="background:${p.group === 'me' ? 'var(--me);color:var(--bg)' : platformColor(p.platform)}">${esc(initials(p.name))}</span>
-        <span class="nm"><b>${esc(cleanName(p.name))}${p.group === 'me' ? ' <span class="muted" style="font-weight:400">(you)</span>' : ''}</b><span>${esc(platformLabel(p.platform))}</span></span>
+        <span class="nm"><b>${esc(cleanName(p.name))}${p.group === 'me' ? ' <span class="muted" style="font-weight:400">(you)</span>' : ''}</b><span>${where(p)}</span></span>
         <span class="cnt" title="messages">${num(p.messages)}</span>
       </div>`).join('') +
       (match.length > SHOW ? `<div class="ppl-note">Showing the ${SHOW} most talked-to of ${num(match.length)}. Search to find anyone.</div>` : '') +
@@ -61,6 +85,7 @@ export class People {
   }
 
   async open(pid) {
+    if (pid === 'matches') return this.openMatches();
     pid = +pid;
     this.current = pid;
     $('ppl-items').querySelectorAll('.ppl').forEach(r => r.classList.toggle('on', +r.dataset.pid === pid));
@@ -126,6 +151,45 @@ export class People {
     if (!isMe) this.loadAccounts(d.person_id);
   }
 
+  // Every open same-person suggestion in one place.
+  openMatches() {
+    this.current = 'matches'; this.dossier = null; this.accounts = null;
+    $('ppl-items').querySelectorAll('.ppl').forEach(r => r.classList.remove('on'));
+    const el = $('person');
+    const side = p => `<div class="m-side" data-open="${p.person_id}">${dot(p.platform)}<div><b>${esc(cleanName(p.name))}</b>
+      <span>${esc(platformLabel(p.platform))} · ${num(p.messages)} msgs</span></div></div>`;
+    el.innerHTML = `<div class="p-head"><div><h1>Possible matches</h1>
+        <div class="sub">Accounts with the same name on different platforms. Nothing is linked until you say so.</div></div></div>
+      ${this.matches.length ? `<div class="chats">${this.matches.map((m, i) => `<div class="chat-row match" data-i="${i}">
+        <div class="m-pair">${side(m.a)}<span class="muted">↔</span>${side(m.b)}</div>
+        <span class="acct-acts"><button class="primary-btn sm" data-same="${i}">Same person</button><button class="ghost-btn sm" data-not="${i}">Not them</button></span>
+      </div>`).join('')}</div>` : '<p class="placeholder">No open suggestions. Link anyone from their profile.</p>'}
+      <div class="acct-status muted" id="match-status"></div>`;
+  }
+
+  async onMatchClick(e) {
+    const b = e.target.closest('button, [data-open]');
+    if (!b) return;
+    if (b.dataset.open) { location.hash = `#people/${b.dataset.open}`; return; }
+    const m = this.matches[+(b.dataset.same ?? b.dataset.not)];
+    if (!m) return;
+    if (b.dataset.not !== undefined) {
+      await api(`/api/person/${m.a.person_id}/reject`, { body: { other: m.b.person_id } });
+      this.matches = this.matches.filter(x => x !== m);
+      this.openMatches(); this.renderList();
+      return;
+    }
+    $('person').querySelectorAll('button').forEach(x => { x.disabled = true; });
+    $('match-status').innerHTML = `<span class="dots"><i></i><i></i><i></i></span> Linking ${esc(cleanName(m.a.name))} and ${esc(cleanName(m.b.name))}… updating your graph`;
+    try {
+      const r = await api(`/api/person/${m.a.person_id}/link`, { body: { other: m.b.person_id } });
+      location.hash = `#people/${r.person_id}`; location.reload();
+    } catch (err) {
+      $('match-status').innerHTML = `<span class="bad">${esc(err.message)}</span>`;
+      $('person').querySelectorAll('button').forEach(x => { x.disabled = false; });
+    }
+  }
+
   // Contacts: the accounts behind this person, same-person suggestions, linking/unlinking and renaming.
   // A change relinks the index on the server, then the page reloads so the list and the graph redraw.
   async loadAccounts(pid) {
@@ -160,6 +224,7 @@ export class People {
   }
 
   onPersonClick(e) {
+    if (this.current === 'matches') return this.onMatchClick(e);
     const b = e.target.closest('button');
     const a = this.accounts;
     if (b && a && b.closest('#p-accounts')) {
