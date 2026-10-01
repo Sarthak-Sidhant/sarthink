@@ -9,8 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <script type="importmap">
-    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-                   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+    { "imports": { "three": "/vendor/three/three.module.js", "three/addons/": "/vendor/three/addons/" } }
   </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%232a78d6'/%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232a78d6' stroke-width='2' opacity='.4'/%3E%3C/svg%3E">
   <script>try { document.documentElement.dataset.theme = localStorage.getItem('sarthink.theme') || 'light'; } catch (e) { document.documentElement.dataset.theme = 'light'; }</script>
@@ -72,6 +71,7 @@
             <span class="focus-what" id="focus-what"></span>
           </div>
           <div class="graph-legend" id="graph-legend"></div>
+          <div class="graph-error" id="graph-error" hidden></div>
           <div class="graph-tools">
             <span class="graph-info" id="graph-info">Loading graph…</span>
             <button class="ghost-btn sm" id="graph-map" title="Back to the full memory map" hidden>

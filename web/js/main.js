@@ -1,10 +1,13 @@
 // App shell: routing between Ask / Reminders / People, theme, backend status, stage wiring.
 import { $, api, esc, num, dot, platformLabel, cleanName, PLATFORMS } from './util.js';
 import { Graph } from './graph.js';
-import { Stage } from './stage.js';
+import { Stage, showGraphError } from './stage.js';
 import { Chat } from './chat.js';
 import { Reminders } from './reminders.js';
 import { People } from './people.js';
+
+addEventListener('error', e => showGraphError(`Something broke: ${e.message}`));
+addEventListener('unhandledrejection', e => showGraphError(`Something broke: ${e.reason?.message || e.reason}`));
 
 const graph = new Graph($('graph'), {
   onHover: h => {
@@ -108,6 +111,7 @@ graph.load('/processed_data/graph/cosmograph_nodes.csv', '/processed_data/graph/
     chat.afterGraphLoad();
   })
   .catch(e => {
-    $('graph-info').textContent = `Graph unavailable (${e.message || e})`;
+    $('graph-info').textContent = 'Graph unavailable';
+    showGraphError(`The memory map couldn't load: ${e.message || e}`);
     $('ppl-items').innerHTML = '<p class="placeholder">The people list needs the graph data, which failed to load.</p>';
   });

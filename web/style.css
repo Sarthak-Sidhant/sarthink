@@ -260,6 +260,13 @@ details.trace summary:hover, details.nums summary:hover { color: var(--text); }
 .f3-tip span { color: var(--muted); }
 .f3-tip p { margin-top: 5px; color: var(--text-2); line-height: 1.45; }
 .f3-tip em { display: block; margin-top: 5px; font-style: normal; font-size: 11px; color: var(--accent-ink); }
+.graph-error {
+  position: absolute; left: 50%; top: 50px; transform: translateX(-50%); z-index: 4; max-width: 86%;
+  display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border-radius: 10px; font-size: 12.5px;
+  background: var(--glass-strong); border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent); color: var(--bad);
+  box-shadow: var(--shadow); backdrop-filter: blur(10px);
+}
+.graph-error button { color: var(--muted); font-size: 16px; line-height: 1; }
 .focus-bar { position: absolute; top: 10px; left: 12px; z-index: 1; display: flex; gap: 8px; align-items: center; }
 .focus-what { font-size: 12px; color: var(--text-2); padding: 4px 10px; border-radius: 20px; background: var(--glass-strong); border: 1px solid var(--border); backdrop-filter: blur(10px); }
 .focus-what b { color: var(--text); font-weight: 600; }
