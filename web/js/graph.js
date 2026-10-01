@@ -1,9 +1,12 @@
 // Memory graph: a 2D view of the precomputed 3D layout, projected onto its two widest axes (PCA).
+// The same renderer can tilt into 3D: the layout rotates about its centre with perspective, and the
+// flat map is just the 3D view looked at straight down its narrowest axis, so the two morph smoothly.
 // The bulk of the graph (~100k nodes and edges) draws with WebGL, so every frame is cheap; a 2D canvas
 // on top draws only what needs text or emphasis: "you", highlighted nodes, hover ring and labels.
 import { css, esc, num, platformOf, platformLabel, cleanName } from './util.js';
 
 const PERSON_GROUPS = /_user$|^me$/;
+const ANGLE_3D = { yaw: 0.55, pitch: -0.5, p: 1 };   // the tilt the map swings to when 3D is turned on
 
 // ─── tiny CSV reader (quoted fields, "" escapes, newlines inside quotes) ──────
 function parseCSV(text) {
@@ -53,45 +56,68 @@ function rgba(s) {
 
 // Level of detail: every node/edge carries a "lod" weight (its message count); anything under u_lod is
 // pushed off-screen in the vertex shader, so zooming out shows the meaningful skeleton, zooming in the rest.
-// points: solid core, darker rim for contrast, a faint halo
+// Shared projection, one camera for both modes: rotate about the target (u_r1..3 rows), then perspective
+// from a camera u_dist away (u_persp 0 = the flat map, 1 = full 3D), then zoom. w < 0: behind the camera.
+const PROJECT = `
+uniform vec3 u_r1; uniform vec3 u_r2; uniform vec3 u_r3; uniform vec3 u_target;
+uniform float u_persp; uniform float u_dist; uniform float u_focal; uniform float u_scale; uniform vec2 u_half;
+vec4 project(vec3 a) {
+  vec3 d = a - u_target;
+  vec3 q = vec3(dot(u_r1, d), dot(u_r2, d), dot(u_r3, d));
+  float depth = u_dist - q.z * u_persp, near = u_focal * 0.01;
+  float f = u_focal / max(near, depth);
+  return vec4(q.xy * f * u_scale / u_half, f, depth - near);
+}`;
+// points. Flat map: solid core, darker rim for contrast, a faint halo. 3D: the classic viewer's soft
+// glowing orbs in its vivid palette, sized in world units so nearer nodes really are bigger.
 const VS_POINTS = `
-attribute vec2 a_pos; attribute vec4 a_col; attribute float a_size; attribute float a_lod;
-uniform vec2 u_center; uniform float u_scale; uniform vec2 u_half; uniform float u_dpr; uniform float u_zoom; uniform float u_dim; uniform float u_lod;
-varying vec4 v_col; varying float v_px;
+attribute vec3 a_pos; attribute vec4 a_col; attribute vec3 a_col3; attribute float a_size; attribute float a_glow; attribute float a_lod;
+uniform float u_dpr; uniform float u_zoom; uniform float u_dim; uniform float u_lod; uniform float u_glowk;
+varying vec4 v_col; varying float v_px; varying float v_glow;
+${PROJECT}
 void main() {
-  if (a_lod < u_lod) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; v_col = vec4(0.0); v_px = 1.0; return; }
-  vec2 p = (a_pos - u_center) * u_scale / u_half;
+  v_glow = u_persp;
+  vec4 p = project(a_pos);
+  if (a_lod < u_lod || p.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; v_col = vec4(0.0); v_px = 1.0; return; }
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
-  float px = max(2.4, a_size * u_zoom * 2.0) * u_dpr * 1.5;
+  float flatPx = max(2.4, a_size * u_zoom * 2.0) * 1.5;
+  float glowPx = clamp(a_glow * u_glowk * p.z, 1.5, 64.0);
+  float px = mix(flatPx, glowPx, u_persp) * u_dpr;
   gl_PointSize = px; v_px = px;
-  v_col = vec4(a_col.rgb, a_col.a * u_dim);
+  v_col = vec4(mix(a_col.rgb, a_col3, u_persp), mix(a_col.a, 1.0, u_persp) * u_dim);
 }`;
 const FS_POINTS = `
 precision mediump float;
-varying vec4 v_col; varying float v_px;
+varying vec4 v_col; varying float v_px; varying float v_glow;
 void main() {
-  float d = length(gl_PointCoord * 2.0 - 1.0);
+  vec2 uv = gl_PointCoord * 2.0 - 1.0;
+  float r2 = dot(uv, uv), d = sqrt(r2);
   float edge = 2.0 / v_px;
   float core = 1.0 - smoothstep(0.66 - edge, 0.66 + edge, d);
   float rim = smoothstep(0.46, 0.62, d) * core;
   float halo = (1.0 - smoothstep(0.6, 1.0, d)) * 0.16;
-  float a = v_col.a * max(core, halo);
+  float glow = r2 > 1.0 ? 0.0 : clamp(exp(-r2 * 2.0) + (1.0 - d) * 0.5, 0.0, 1.0);
+  float a = v_col.a * mix(max(core, halo), glow, v_glow);
   if (a <= 0.004) discard;
-  vec3 rgb = mix(v_col.rgb, v_col.rgb * 0.62, rim);
+  vec3 rgb = mix(mix(v_col.rgb, v_col.rgb * 0.62, rim), v_col.rgb, v_glow);
   gl_FragColor = vec4(rgb * a, a);
 }`;
-// edges: coloured by their endpoints' platforms, very faint
+// edges: coloured by their endpoints' platforms, very faint; in 3D they fade out entirely, as in the classic view
 const VS_LINES = `
-attribute vec2 a_pos; attribute vec4 a_col; attribute float a_lod;
-uniform vec2 u_center; uniform float u_scale; uniform vec2 u_half; uniform float u_lod;
+attribute vec3 a_pos; attribute vec4 a_col; attribute float a_lod;
+uniform float u_lod;
 varying vec4 v_col;
+${PROJECT}
 void main() {
-  if (a_lod < u_lod) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); v_col = vec4(0.0); return; }
-  vec2 p = (a_pos - u_center) * u_scale / u_half; gl_Position = vec4(p.x, -p.y, 0.0, 1.0); v_col = a_col;
+  vec4 p = project(a_pos);
+  if (a_lod < u_lod || p.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); v_col = vec4(0.0); return; }
+  gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
+  v_col = vec4(a_col.rgb, a_col.a * (1.0 - u_persp));
 }`;
 const FS_LINES = `
 precision mediump float; uniform float u_alpha; varying vec4 v_col;
-void main() { gl_FragColor = vec4(v_col.rgb * u_alpha, u_alpha); }`;
+void main() { float a = u_alpha * v_col.a; gl_FragColor = vec4(v_col.rgb * a, a); }`;
+const GLOW_WORLD = 26;   // a node's glow radius per log2(messages), in layout units (the classic viewer's scale)
 
 export class Graph {
   constructor(canvas, { onClick, onHover, onInfo } = {}) {
@@ -102,7 +128,7 @@ export class Graph {
     this.ctx = this.ov.getContext('2d');
     this.gl = canvas.getContext('webgl', { antialias: true, premultipliedAlpha: true, alpha: true });
     this.onClick = onClick; this.onHover = onHover; this.onInfo = onInfo;
-    this.n = 0; this.view = { cx: 0, cy: 0, s: 1 }; this.hi = null; this.focus = null; this.hover = -1;
+    this.n = 0; this.view = { t: [0, 0, 0], s: 1, D: 1, yaw: 0, pitch: 0, p: 0 }; this.vel = null; this.is3D = false; this.spin = false; this.hi = null; this.focus = null; this.hover = -1;
     this.anim = null; this.dpr = Math.min(2, window.devicePixelRatio || 1); this.frameReq = 0; this.glDirty = true;
     this._bindInput();
     new ResizeObserver(() => this.resize()).observe(canvas.parentElement);
@@ -117,12 +143,15 @@ export class Graph {
     this.size = new Float32Array(n); this.x = new Float32Array(n); this.y = new Float32Array(n);
     this.isPerson = new Uint8Array(n); this.index = new Map();
     const P = new Float64Array(n * 3);
+    this.col3 = new Float32Array(n * 3); this.platRaw = {};
     for (let i = 0; i < n; i++) {
       const d = N.rows[i];
+      const c3 = rgba(d[c.color] || '#8899aa'); this.col3.set(c3.slice(0, 3), i * 3);
       this.ids[i] = d[c.id]; this.labels[i] = d[c.label]; this.groups[i] = d[c.group];
       this.size[i] = +d[c.size] || 1;
       this.isPerson[i] = PERSON_GROUPS.test(d[c.group]) ? 1 : 0;
       this.plat[i] = platformOf(d[c.group]);
+      if (this.isPerson[i] && !this.platRaw[this.plat[i]]) this.platRaw[this.plat[i]] = d[c.color];
       P[i * 3] = +d[c.layout_x] || 0; P[i * 3 + 1] = +d[c.layout_y] || 0; P[i * 3 + 2] = +d[c.layout_z] || 0;
       this.index.set(d[c.id], i);
     }
@@ -165,7 +194,7 @@ export class Graph {
       group: this.groups[i], messages: this.size[i],
     }));
     this.resize();
-    this.fit(false);
+    this.fit(false, this.is3D ? ANGLE_3D : null);
     if (this._pending) { const [ids, o] = this._pending; this._pending = null; this.highlight(ids, o); }
     this.onInfo?.(`${num(this.people.length)} people · ${num(n - this.people.length)} chats`);
     return this;
@@ -191,12 +220,50 @@ export class Graph {
       return v;
     };
     const e1 = power(), e2 = power(e1);
+    const e3 = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+    this.basis = [e1, e2, e3];
+    // 3D: centred on the layout's median so it orbits about the middle of the cloud
+    const med = [0, 1, 2].map(a => { const v = []; for (let i = a; i < n * 3; i += step * 3) v.push(P[i]); v.sort((p, q) => p - q); return v[v.length >> 1] || 0; });
+    this.X = new Float32Array(n * 3);
+    const rs = [];
     for (let i = 0; i < n; i++) {
-      const a = P[i * 3], b = P[i * 3 + 1], c = P[i * 3 + 2];
+      const a = P[i * 3] - med[0], b = P[i * 3 + 1] - med[1], c = P[i * 3 + 2] - med[2];
+      this.X[i * 3] = a; this.X[i * 3 + 1] = b; this.X[i * 3 + 2] = c;
       this.x[i] = a * e1[0] + b * e1[1] + c * e1[2];
       this.y[i] = a * e2[0] + b * e2[1] + c * e2[2];
+      if (i % step === 0) rs.push(Math.hypot(a, b, c));
     }
+    rs.sort((p, q) => p - q);
+    this.dist = 3 * (rs[Math.floor(rs.length * 0.98)] || 1);   // focal length: the camera's resting distance
+    this.view.D = this.dist; this._tf = [0, 0];
+    this.R = this._rot(this.view);
   }
+
+  // rotation rows for a view: orbit (yaw, pitch) applied on top of the PCA basis
+  _rot(v) {
+    const [e1, e2, e3] = this.basis, cy = Math.cos(v.yaw || 0), sy = Math.sin(v.yaw || 0), cp = Math.cos(v.pitch || 0), sp = Math.sin(v.pitch || 0);
+    const r1 = e1.map((_, k) => cy * e1[k] + sy * e3[k]);
+    const t3 = e1.map((_, k) => -sy * e1[k] + cy * e3[k]);
+    const r2 = e2.map((_, k) => cp * e2[k] - sp * t3[k]);
+    const r3 = e2.map((_, k) => sp * e2[k] + cp * t3[k]);
+    return [r1, r2, r3];
+  }
+  get flat() { const v = this.view; return !v.p && !v.yaw && !v.pitch; }
+  // pixels per layout unit at the target's depth
+  get pxPerUnit() { return this.view.s * this.dist / this.view.D; }
+  // a node relative to the camera target, after rotation and perspective, before zoom:
+  // [x, y, depth scale, in front of the camera?]
+  _proj(i, R = this.R, v = this.view) {
+    const t = v.t, F = this.dist;
+    if (R === this.R && v === this.view && this.flat) { const f = F / v.D; return [(this.x[i] - this._tf[0]) * f, (this.y[i] - this._tf[1]) * f, f, true]; }
+    const a = this.X[i * 3] - t[0], b = this.X[i * 3 + 1] - t[1], c = this.X[i * 3 + 2] - t[2];
+    const depth = v.D - (R[2][0] * a + R[2][1] * b + R[2][2] * c) * v.p, near = F * 0.01;
+    const f = F / Math.max(near, depth);
+    return [(R[0][0] * a + R[0][1] * b + R[0][2] * c) * f, (R[1][0] * a + R[1][1] * b + R[1][2] * c) * f, f, depth > near];
+  }
+  // on-screen glow diameter (css px) of node i at depth scale f, matching the shader
+  _glowPx(i, f) { return Math.max(1.5, Math.min(64, Math.log2(this.size[i] + 1) * this._glowK() * f)); }
+  _glowK() { return GLOW_WORLD * this.view.s * 2; }
 
   _buildGrid() {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -228,6 +295,7 @@ export class Graph {
         gl.attachShader(p, s);
       }
       gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
       const u = {}, a = {};
       for (let i = 0; i < gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i++) { const nm = gl.getActiveUniform(p, i).name; u[nm] = gl.getUniformLocation(p, nm); }
       for (let i = 0; i < gl.getProgramParameter(p, gl.ACTIVE_ATTRIBUTES); i++) { const nm = gl.getActiveAttrib(p, i).name; a[nm] = gl.getAttribLocation(p, nm); }
@@ -240,14 +308,14 @@ export class Graph {
     for (let i = 0; i < this.n; i++) if (!this.isPerson[i]) order.push(i);
     for (let k = this.byImportance.length - 1; k >= 0; k--) if (this.byImportance[k] !== this.me) order.push(this.byImportance[k]);
     this.order = order;
-    const pos = new Float32Array(order.length * 2), sz = new Float32Array(order.length);
-    order.forEach((i, k) => { pos[k * 2] = this.x[i]; pos[k * 2 + 1] = this.y[i]; sz[k] = this.r[i]; });
-    const lod = new Float32Array(order.length);
-    order.forEach((i, k) => { lod[k] = this.lod[i]; });
-    this.bufPos = this._buf(pos); this.bufSize = this._buf(sz); this.bufLod = this._buf(lod);
-    const lp = new Float32Array(this.es.length * 4);
+    const pos = new Float32Array(order.length * 3), sz = new Float32Array(order.length);
+    order.forEach((i, k) => { pos.set(this.X.subarray(i * 3, i * 3 + 3), k * 3); sz[k] = this.r[i]; });
+    const lod = new Float32Array(order.length), glow = new Float32Array(order.length);
+    order.forEach((i, k) => { lod[k] = this.lod[i]; glow[k] = Math.log2(this.size[i] + 1); });
+    this.bufPos = this._buf(pos); this.bufSize = this._buf(sz); this.bufLod = this._buf(lod); this.bufGlow = this._buf(glow);
+    const lp = new Float32Array(this.es.length * 6);
     for (let k = 0; k < this.es.length; k++) {
-      lp[k * 4] = this.x[this.es[k]]; lp[k * 4 + 1] = this.y[this.es[k]]; lp[k * 4 + 2] = this.x[this.ed[k]]; lp[k * 4 + 3] = this.y[this.ed[k]];
+      lp.set(this.X.subarray(this.es[k] * 3, this.es[k] * 3 + 3), k * 6); lp.set(this.X.subarray(this.ed[k] * 3, this.ed[k] * 3 + 3), k * 6 + 3);
     }
     this.bufLines = this._buf(lp);
     const ll = new Float32Array(this.es.length * 2);
@@ -281,8 +349,20 @@ export class Graph {
           lc[k * 8 + o] = c[0]; lc[k * 8 + o + 1] = c[1]; lc[k * 8 + o + 2] = c[2]; lc[k * 8 + o + 3] = 1;
         }
       }
-      for (const b of [this.bufCol, this.bufLineCol]) if (b) this.gl.deleteBuffer(b);
-      this.bufCol = this._buf(col); this.bufLineCol = this._buf(lc);
+      // 3D palette: the classic viewer's vivid colours. Its darker chat shades were made to sink into black,
+      // so on a light background chats become light tints of their platform colour and white Facebook turns violet.
+      const dark = this.colors.dark;
+      this.platColor3 = { ...this.platRaw };
+      if (!dark && /^#f/i.test(this.platColor3.facebook || '')) this.platColor3.facebook = this.colors.plat.facebook;
+      const plat3 = Object.fromEntries(Object.entries(this.platColor3).map(([k, v]) => [k, rgba(v)]));
+      const col3 = new Float32Array(this.order.length * 3);
+      this.order.forEach((i, k) => {
+        if (dark || !plat3[this.plat[i]]) { col3.set(this.col3.subarray(i * 3, i * 3 + 3), k * 3); return; }
+        const c = plat3[this.plat[i]], w = this.isPerson[i] ? 0 : 0.45;
+        col3.set([c[0] + (1 - c[0]) * w, c[1] + (1 - c[1]) * w, c[2] + (1 - c[2]) * w], k * 3);
+      });
+      for (const b of [this.bufCol, this.bufLineCol, this.bufCol3]) if (b) this.gl.deleteBuffer(b);
+      this.bufCol = this._buf(col); this.bufLineCol = this._buf(lc); this.bufCol3 = this._buf(col3);
     }
     this.glDirty = true;
     if (redraw) this.draw();
@@ -295,7 +375,9 @@ export class Graph {
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     const common = pr => {
       gl.useProgram(pr.p);
-      gl.uniform2f(pr.u.u_center, v.cx, v.cy); gl.uniform1f(pr.u.u_scale, v.s); gl.uniform2f(pr.u.u_half, this.w / 2, this.h / 2);
+      gl.uniform3fv(pr.u.u_target, v.t); gl.uniform1f(pr.u.u_scale, v.s); gl.uniform2f(pr.u.u_half, this.w / 2, this.h / 2);
+      gl.uniform3fv(pr.u.u_r1, this.R[0]); gl.uniform3fv(pr.u.u_r2, this.R[1]); gl.uniform3fv(pr.u.u_r3, this.R[2]);
+      gl.uniform1f(pr.u.u_persp, v.p || 0); gl.uniform1f(pr.u.u_dist, v.D); gl.uniform1f(pr.u.u_focal, this.dist);
     };
     const attr = (pr, name, buf, size) => {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.enableVertexAttribArray(pr.a[name]); gl.vertexAttribPointer(pr.a[name], size, gl.FLOAT, false, 0, 0);
@@ -304,14 +386,15 @@ export class Graph {
     const lodT = this.lodThreshold();
     gl.uniform1f(this.L.u.u_alpha, this.colors.edgeAlpha * (dim ? 0.12 : 1));
     gl.uniform1f(this.L.u.u_lod, lodT);
-    attr(this.L, 'a_pos', this.bufLines, 2); attr(this.L, 'a_col', this.bufLineCol, 4); attr(this.L, 'a_lod', this.bufLineLod, 1);
-    gl.drawArrays(gl.LINES, 0, this.es.length * 2);
+    attr(this.L, 'a_pos', this.bufLines, 3); attr(this.L, 'a_col', this.bufLineCol, 4); attr(this.L, 'a_lod', this.bufLineLod, 1);
+    if (v.p < 0.999) gl.drawArrays(gl.LINES, 0, this.es.length * 2);
     for (const a of Object.values(this.L.a)) gl.disableVertexAttribArray(a);
     const P = this.P;
     common(P);
     gl.uniform1f(P.u.u_dpr, this.dpr); gl.uniform1f(P.u.u_zoom, this.zoomFactor()); gl.uniform1f(P.u.u_dim, dim ? 0.07 : 1);
-    gl.uniform1f(P.u.u_lod, lodT);
-    attr(P, 'a_pos', this.bufPos, 2); attr(P, 'a_col', this.bufCol, 4); attr(P, 'a_size', this.bufSize, 1); attr(P, 'a_lod', this.bufLod, 1);
+    gl.uniform1f(P.u.u_lod, lodT); gl.uniform1f(P.u.u_glowk, this._glowK());
+    attr(P, 'a_col3', this.bufCol3, 3); attr(P, 'a_glow', this.bufGlow, 1);
+    attr(P, 'a_pos', this.bufPos, 3); attr(P, 'a_col', this.bufCol, 4); attr(P, 'a_size', this.bufSize, 1); attr(P, 'a_lod', this.bufLod, 1);
     gl.drawArrays(gl.POINTS, 0, this.order.length);
     for (const a of Object.values(P.a)) gl.disableVertexAttribArray(a);
   }
@@ -325,46 +408,77 @@ export class Graph {
     if (this.n && !this.fitted) this.fit(false);
     this.glDirty = true; this.draw();
   }
-  toScreen(i) { const v = this.view; return [(this.x[i] - v.cx) * v.s + this.w / 2, (this.y[i] - v.cy) * v.s + this.h / 2]; }
+  toScreen(i) { const s = this.view.s, [x, y] = this._proj(i); return [x * s + this.w / 2, y * s + this.h / 2]; }
+  zoomK() { return this.pxPerUnit / (this.fitScale || this.pxPerUnit); }
   // zoomed out: only the meaningful skeleton; each doubling of zoom halves the cut until everything shows
-  lodThreshold() { const k = this.view.s / (this.fitScale || this.view.s); return k >= 3 ? 0 : 2 / Math.max(1, k); }
+  lodThreshold() { if (this.view.p > 0.5) return 0; const k = this.zoomK(); return k >= 3 ? 0 : 2 / Math.max(1, k); }
   visibleCount() { const t = this.lodThreshold(); let c = 0; for (let i = 0; i < this.n; i++) if (this.lod[i] >= t) c++; return c; }
-  zoomFactor() { return Math.max(0.6, Math.min(3.2, Math.sqrt(this.view.s / (this.fitScale || this.view.s)))); }
-  setView(v) { this.view = v; this.glDirty = true; this.draw(); }
+  zoomFactor() { return Math.max(0.6, Math.min(3.2, Math.sqrt(this.zoomK()))); }
+  setView(v) {
+    this.view = { yaw: 0, pitch: 0, p: 0, D: this.dist, ...v };
+    this.R = this._rot(this.view);
+    const t = this.view.t, [e1, e2] = this.basis || [[1, 0, 0], [0, 1, 0]];
+    this._tf = [t[0] * e1[0] + t[1] * e1[1] + t[2] * e1[2], t[0] * e2[0] + t[1] * e2[1] + t[2] * e2[2]];
+    this.glDirty = true; this.draw();
+  }
+  // move the target by a screen-space offset (px), at the target's depth
+  _shift(t, R, dx, dy, k) { return t.map((x, a) => x + (dx * R[0][a] + dy * R[1][a]) * k); }
 
-  fit(animate = true) {
+  // flat map ⇄ 3D: tilt and add perspective (or straighten back out), refitting at the new angle
+  set3D(on, animate = true) {
+    this.is3D = !!on; this.spin = this.is3D && !this.hi; this.vel = null;
     if (!this.n || !this.w) return;
+    this.fit(animate, this.is3D ? ANGLE_3D : { yaw: 0, pitch: 0, p: 0 });
+  }
+
+  fit(animate = true, angle = null) {
+    if (!this.n || !this.w) return;
+    const a = angle || { yaw: this.view.yaw, pitch: this.view.pitch, p: this.view.p };
+    const R = this._rot(a), v0 = { ...this.view, ...a, D: this.dist };
     // robust extent from a sample: ignore the outermost stragglers so they don't shrink everything
     const step = Math.max(1, Math.floor(this.n / 5000)), xs = [], ys = [];
-    for (let i = 0; i < this.n; i += step) { xs.push(this.x[i]); ys.push(this.y[i]); }
+    for (let i = 0; i < this.n; i += step) { const [x, y] = this._proj(i, R, v0); xs.push(x); ys.push(y); }
     xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
     const q = (a, p) => a[Math.floor(p * (a.length - 1))];
     const box = { x0: q(xs, 0.004), x1: q(xs, 0.996), y0: q(ys, 0.004), y1: q(ys, 0.996) };
-    const s = Math.min(this.w / (box.x1 - box.x0 || 1), this.h / (box.y1 - box.y0 || 1)) * 0.84;
+    const s = Math.min(this.w / (box.x1 - box.x0 || 1), this.h / (box.y1 - box.y0 || 1)) * (a.p ? 1.05 : 0.84);
     this.fitScale = s; this.fitted = true;
-    this.goTo({ cx: (box.x0 + box.x1) / 2, cy: (box.y0 + box.y1) / 2, s }, animate);
+    const t = this._shift(this.view.t, R, (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, 1);
+    this.goTo({ ...a, t, s, D: this.dist }, animate);
   }
   frame(indices, animate = true) {
     let pts = indices.filter(i => i !== this.me);
     if (!pts.length) pts = indices;
     if (!pts.length || !this.w) return;
+    // centre on the points' 3D bounding box, then fit their spread as seen from the current angle
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const i of pts) for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], this.X[i * 3 + a]); hi[a] = Math.max(hi[a], this.X[i * 3 + a]); }
+    const t = lo.map((l, a) => (l + hi[a]) / 2), flatV = { ...this.view, t, p: 0, D: this.dist };
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const i of pts) { x0 = Math.min(x0, this.x[i]); x1 = Math.max(x1, this.x[i]); y0 = Math.min(y0, this.y[i]); y1 = Math.max(y1, this.y[i]); }
+    for (const i of pts) { const [x, y] = this._proj(i, this.R, flatV); x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
     const minSpan = (this.bounds.x1 - this.bounds.x0) / 14;
-    const sw = Math.max(x1 - x0, minSpan), sh = Math.max(y1 - y0, minSpan);
-    const s = Math.min(this.w * 0.6 / sw, this.h * 0.6 / sh, this.fitScale * 10);
-    this.goTo({ cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, s }, animate);
+    const sw = Math.max(x0 < 0 ? -x0 * 2 : 0, x1 * 2, minSpan), sh = Math.max(y0 < 0 ? -y0 * 2 : 0, y1 * 2, minSpan);
+    const ppu = Math.min(this.w * 0.6 / sw, this.h * 0.6 / sh, this.fitScale * 10);   // wanted px per unit
+    if (this.is3D) this.goTo({ ...this.view, t, D: this.view.s * this.dist / ppu }, animate);   // dolly in
+    else this.goTo({ ...this.view, t, s: ppu, D: this.dist }, animate);
   }
   goTo(target, animate = true) {
     cancelAnimationFrame(this.anim);
     if (!animate) { this.setView({ ...target }); return; }
     const from = { ...this.view }, t0 = performance.now(), dur = 800;
+    // take the short way round when straightening a spun 3D view
+    if (target.yaw !== undefined) from.yaw = target.yaw + Math.atan2(Math.sin(from.yaw - target.yaw), Math.cos(from.yaw - target.yaw));
     const ease = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
     const step = now => {
       const t = Math.min(1, (now - t0) / dur), e = ease(t);
       const ls = Math.log(from.s) + (Math.log(target.s) - Math.log(from.s)) * e;
-      this.setView({ cx: from.cx + (target.cx - from.cx) * e, cy: from.cy + (target.cy - from.cy) * e, s: Math.exp(ls) });
-      if (t < 1) this.anim = requestAnimationFrame(step);
+      const lerp = k => (from[k] || 0) + ((target[k] ?? from[k] ?? 0) - (from[k] || 0)) * e;
+      const tt = target.t || from.t, D0 = from.D || this.dist, D1 = target.D || D0;
+      this.setView({
+        t: from.t.map((x, a) => x + (tt[a] - x) * e), s: Math.exp(ls), D: Math.exp(Math.log(D0) + (Math.log(D1) - Math.log(D0)) * e),
+        yaw: lerp('yaw'), pitch: lerp('pitch'), p: lerp('p'),
+      });
+      if (t < 1) this.anim = requestAnimationFrame(step); else this.anim = null;
     };
     this.anim = requestAnimationFrame(step);
   }
@@ -379,10 +493,11 @@ export class Graph {
     this.hi = idx.length ? new Set(idx) : null;
     this.focus = focus ? new Set(focus.map(id => this.index.get(id)).filter(i => i !== undefined)) : null;
     this.glDirty = true;
+    if (idx.length) this.spin = false;
     if (fly && idx.length) this.frame(this.focus?.size ? [...this.focus] : idx); else this.draw();
     return idx.length;
   }
-  clear() { this._pending = null; this.hi = null; this.focus = null; this.born = null; this.glDirty = true; this.fit(); }
+  clear() { this._pending = null; this.hi = null; this.focus = null; this.born = null; this.glDirty = true; this.spin = this.is3D; this.fit(); }
 
   // ─── drawing: WebGL only when the view changed; the overlay animates on its own clock ─────
   draw() {
@@ -391,6 +506,20 @@ export class Graph {
   }
   _render(t = performance.now()) {
     if (!this.n || !this.w || !this.order) return;
+    // 3D idles with a slow turn until you grab it
+    const dt = Math.min(100, t - (this._spunAt || t));
+    this._spunAt = t;
+    if (!this.anim && !this._dragging) {
+      if (this.vel) {   // let a flicked orbit glide to a stop
+        const v = this.view, k = Math.pow(0.9, dt / 16);
+        v.yaw += this.vel[0] * dt; v.pitch = Math.max(-1.5, Math.min(1.5, v.pitch + this.vel[1] * dt));
+        this.vel = this.vel.map(x => x * k);
+        if (Math.abs(this.vel[0]) + Math.abs(this.vel[1]) < 1e-5) this.vel = null;
+        this.R = this._rot(v); this.glDirty = true;
+      } else if (this.spin) {
+        this.view.yaw += dt * 0.00012; this.R = this._rot(this.view); this.glDirty = true;
+      }
+    }
     if (this.glDirty) { this._drawGL(); this.glDirty = false; }
     const c = this.ctx;
     c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, this.ov.width, this.ov.height);
@@ -399,12 +528,15 @@ export class Graph {
     // keep animating (pulse, flowing links) while visible; ~30 fps is plenty for ambient motion
     if (this.cv.offsetParent !== null && !document.hidden) {
       clearTimeout(this._tick);
-      this._tick = setTimeout(() => this.draw(), 33);
+      if (this.is3D && (this.spin || this.vel)) this.draw();   // camera moving: every frame
+      else this._tick = setTimeout(() => this.draw(), 33);
     }
   }
 
   _renderOverlay(c, t) {
-    const z = this.zoomFactor(), C = this.colors, labels = [];
+    const z = this.zoomFactor(), labels = [];
+    const space = this.view.p > 0.5, C = space ? { ...this.colors, plat: { ...this.colors.plat, ...this.platColor3 } } : this.colors;
+    this._C = C;
     const me = this.me >= 0 ? this.toScreen(this.me) : null;
     if (this.hi) {
       // links: the graph's own edges among lit nodes, plus a curved line from you to each lit person
@@ -485,7 +617,7 @@ export class Graph {
   }
 
   _drawLabels(c, labels) {
-    const placed = [], C = this.colors;
+    const placed = [], C = this._C || this.colors;
     c.textBaseline = 'middle'; c.lineJoin = 'round';
     for (const L of labels) {
       let t = L.text || cleanName(this.labels[L.i]);
@@ -512,7 +644,8 @@ export class Graph {
   // ─── input ───────────────────────────────────────────────────────────────
   pick(mx, my) {
     if (!this.n || !this.w) return -1;
-    const v = this.view, wx = (mx - this.w / 2) / v.s + v.cx, wy = (my - this.h / 2) / v.s + v.cy;
+    if (!this.flat) return this._pickProjected(mx, my);
+    const v = { s: this.pxPerUnit }, wx = (mx - this.w / 2) / v.s + this._tf[0], wy = (my - this.h / 2) / v.s + this._tf[1];
     const rad = 14 / v.s, g = this.grid, z = this.zoomFactor(), lodT = this.lodThreshold();
     const cx0 = Math.max(0, Math.floor((wx - rad - g.x0) / g.cw)), cx1 = Math.min(g.cells - 1, Math.floor((wx + rad - g.x0) / g.cw));
     const cy0 = Math.max(0, Math.floor((wy - rad - g.y0) / g.ch)), cy1 = Math.min(g.cells - 1, Math.floor((wy + rad - g.y0) / g.ch));
@@ -528,6 +661,24 @@ export class Graph {
           if (dd < 8 && dd < bd) { bd = dd; best = i; }
         }
       }
+    }
+    return best;
+  }
+  // rotated / perspective view: no grid, just test every visible node on screen
+  _pickProjected(mx, my) {
+    const z = this.zoomFactor(), lodT = this.lodThreshold();
+    let best = -1, bd = Infinity;
+    const s = this.view.s, glow = this.view.p > 0.5;
+    for (let i = 0; i < this.n; i++) {
+      if (this.hi ? !this.hi.has(i) && i !== this.me : this.lod[i] < lodT) continue;
+      const [px, py, f, front] = this._proj(i);
+      if (!front) continue;
+      const x = px * s + this.w / 2, y = py * s + this.h / 2;
+      if (Math.abs(x - mx) > 80 || Math.abs(y - my) > 80) continue;
+      const r = glow && !this.hi ? this._glowPx(i, f) * 0.35 : this.r[i] * z;
+      // prefer the nearer of overlapping nodes, as you'd expect when looking into the cloud
+      const dd = Math.hypot(x - mx, y - my) - r - (this.isPerson[i] ? 3 : 0) - (glow ? f * 2 : 0);
+      if (dd < 8 && dd < bd) { bd = dd; best = i; }
     }
     return best;
   }
@@ -568,17 +719,24 @@ export class Graph {
     const cv = this.ov;
     let drag = null, moved = false;
     const pos = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+    cv.addEventListener('contextmenu', e => { if (this.is3D) e.preventDefault(); });
     cv.addEventListener('pointerdown', e => {
       cv.setPointerCapture(e.pointerId);
-      drag = { p: pos(e), v: { ...this.view } }; moved = false;
-      cancelAnimationFrame(this.anim);
+      // in 3D: drag orbits, shift/right/middle-drag pans
+      drag = { p: pos(e), v: { ...this.view }, R: this.R, ppu: this.pxPerUnit, orbit: this.is3D && e.button === 0 && !e.shiftKey, last: [...pos(e), performance.now()] }; moved = false;
+      cancelAnimationFrame(this.anim); this.anim = null; this._dragging = true; this.vel = null;
     });
     cv.addEventListener('pointermove', e => {
       const [mx, my] = pos(e);
       if (drag) {
         const dx = mx - drag.p[0], dy = my - drag.p[1];
         if (Math.abs(dx) + Math.abs(dy) > 3) { moved = true; cv.classList.add('dragging'); this.onHover?.(null); }
-        if (moved) this.setView({ ...drag.v, cx: drag.v.cx - dx / drag.v.s, cy: drag.v.cy - dy / drag.v.s });
+        if (moved && drag.orbit) {
+          this.spin = false;
+          const now = performance.now(), ddt = Math.max(1, now - drag.last[2]);
+          drag.vel = [(mx - drag.last[0]) * 0.006 / ddt, -(my - drag.last[1]) * 0.006 / ddt]; drag.last = [mx, my, now];
+          this.setView({ ...this.view, yaw: drag.v.yaw + dx * 0.006, pitch: Math.max(-1.5, Math.min(1.5, drag.v.pitch - dy * 0.006)) });
+        } else if (moved) this.setView({ ...this.view, t: this._shift(drag.v.t, drag.R, -dx, -dy, 1 / drag.ppu) });
         return;
       }
       const h = this.pick(mx, my);
@@ -588,19 +746,23 @@ export class Graph {
     cv.addEventListener('pointerup', e => {
       if (!drag) return;
       cv.classList.remove('dragging');
-      if (!moved) { const [mx, my] = pos(e); const i = this.pick(mx, my); if (i >= 0) this.onClick?.(this.nodeInfo(i)); }
-      drag = null;
+      if (!moved && e.button === 0) { const [mx, my] = pos(e); const i = this.pick(mx, my); if (i >= 0) this.onClick?.(this.nodeInfo(i)); }
+      // flicked: keep turning and ease out (only if the pointer was still moving when released)
+      if (moved && drag.orbit && drag.vel && performance.now() - drag.last[2] < 80) { this.vel = drag.vel; this.draw(); }
+      drag = null; this._dragging = false;
     });
-    cv.addEventListener('pointercancel', () => { drag = null; cv.classList.remove('dragging'); });
+    cv.addEventListener('pointercancel', () => { drag = null; this._dragging = false; cv.classList.remove('dragging'); });
     cv.addEventListener('pointerleave', () => { if (this.hover >= 0) { this.hover = -1; this.draw(); } this.onHover?.(null); });
     cv.addEventListener('wheel', e => {
       e.preventDefault();
-      cancelAnimationFrame(this.anim);
-      const [mx, my] = pos(e), v = this.view, fs = this.fitScale || v.s;
-      const k = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0018));
-      const s = Math.max(fs * 0.4, Math.min(fs * 60, v.s * k));
-      const wx = (mx - this.w / 2) / v.s + v.cx, wy = (my - this.h / 2) / v.s + v.cy;
-      this.setView({ s, cx: wx - (mx - this.w / 2) / s, cy: wy - (my - this.h / 2) / s });
+      cancelAnimationFrame(this.anim); this.anim = null;
+      const [mx, my] = pos(e), v = this.view, fs = this.fitScale || v.s, ppu = this.pxPerUnit;
+      // zoom toward the cursor: 2D scales the map, 3D dollies the camera (fly into the cloud)
+      const ppu2 = Math.max(fs * 0.4, Math.min(fs * (this.is3D ? 200 : 60), ppu * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0018))));
+      const k = ppu2 / ppu;
+      const t = this._shift(v.t, this.R, mx - this.w / 2, my - this.h / 2, (1 - 1 / k) / ppu);
+      if (this.is3D) { this.spin = false; this.setView({ ...v, t, D: v.D / k }); }
+      else this.setView({ ...v, t, s: v.s * k });
     }, { passive: false });
   }
 }

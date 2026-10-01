@@ -28,6 +28,7 @@ export class Stage {
     if (!this.focus.visible && !$('overview').hidden) return;
     this.focus.hide();
     $('overview').hidden = false; $('focus-bar').hidden = true; $('graph-map').hidden = true;
+    $('graph-3d').hidden = false;
     this.graph.resize(); this.graph.glDirty = true; this.graph.draw();
   }
   async _load() {
@@ -47,7 +48,7 @@ export class Stage {
   async _focusMode(spec, what) {
     if (!spec) return;
     $('overview').hidden = true;
-    $('graph-clear').hidden = true; $('graph-map').hidden = false;
+    $('graph-clear').hidden = true; $('graph-map').hidden = false; $('graph-3d').hidden = true;
     $('focus-what').innerHTML = what; $('focus-bar').hidden = false;
     this.focus.show(spec);
   }
