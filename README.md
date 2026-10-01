@@ -17,7 +17,7 @@ can run everything without anyone's real data.
 ```bash
 pip install -r requirements.txt
 cp .env.example .env          # optional: add DEEPSEEK_API_KEY to enable the assistant
-python3 run.py --demo         # then open http://127.0.0.1:8000
+python3 run.py --demo         # then open http://127.0.0.1:8080
 ```
 
 - Python 3.10+. The first start downloads a small embedding model (~1.2 GB, Qwen3-Embedding-0.6B) and runs it
@@ -128,7 +128,8 @@ python3 run.py --model 0.6b                      # or: python3 run.py --gpu <ssh
 ## Project layout
 
 ```
-run.py                     one-command launcher
+run.py                     one-command launcher (API on :8000 + web app on :8080)
+web/                       the web app: chat + graph + sources, reminders, people (no build step)
 sarthink_graph.html        3D viewer + chat, dossier, inbox (single file, Three.js)
 scripts/parsers/           platform export parsers -> SQLite
 scripts/context/           fetch missing reply context (Twitter, Reddit)

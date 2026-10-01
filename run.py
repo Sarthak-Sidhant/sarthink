@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Start Sarthink: the 3D memory graph + search + memory assistant at http://127.0.0.1:8000
+"""Start Sarthink: the web app at http://127.0.0.1:8080 (chat, memory graph, reminders, people),
+backed by the search + memory-assistant API on :8000 (which still serves the classic 3D viewer at /).
 
   python3 run.py --demo                 fictional demo archive, CPU only (start here)
   python3 run.py                        your own archive in processed_data/ (needs the index built)
@@ -23,7 +24,8 @@ def main():
     ap.add_argument("--data", help="data folder (default: processed_data, or demo with --demo)")
     ap.add_argument("--model", help="embedding model: 0.6b (CPU) or 8b (GPU); default 0.6b for --demo, else 8b")
     ap.add_argument("--gpu", nargs=2, metavar=("SSH_HOST", "SSH_PORT"), help="tunnel to a vast.ai embed_server")
-    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--port", type=int, default=8000, help="API port (the classic 3D viewer is served here too)")
+    ap.add_argument("--web-port", type=int, default=8080, help="web app port; 0 to skip it")
     a = ap.parse_args()
 
     env = dict(os.environ)
@@ -48,14 +50,21 @@ def main():
     except ImportError:
         sys.exit("Missing dependencies: pip install -r requirements.txt")
 
+    web = None
+    if a.web_port:
+        web = subprocess.Popen([sys.executable, str(ROOT / "web" / "serve.py"), "--port", str(a.web_port),
+                                "--api", f"http://127.0.0.1:{a.port}"])
+    url = f"http://127.0.0.1:{a.web_port or a.port}/"
     print(f"Sarthink · data: {env['SARTHINK_DATA']} · embeddings: {env['SARTHINK_EMBED_MODEL']}"
-          f" · open http://127.0.0.1:{a.port}/  (first start downloads the embedding model)")
+          f" · open {url}  (first start downloads the embedding model)")
     try:
         subprocess.run([sys.executable, str(ROOT / "scripts" / "api" / "server.py"), "--port", str(a.port),
                         "--model", env["SARTHINK_EMBED_MODEL"]], env=env, check=False)
     finally:
         if tunnel:
             tunnel.terminate()
+        if web:
+            web.terminate()
 
 
 if __name__ == "__main__":
