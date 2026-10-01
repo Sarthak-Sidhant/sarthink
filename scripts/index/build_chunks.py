@@ -126,6 +126,7 @@ class UnionFind:
 
 def load(conn):
     person_of = {r["user_id"]: r["person_id"] for r in conn.execute("SELECT user_id, person_id FROM PersonAliases")}
+    per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
     person_name = {r["person_id"]: r["name"] for r in conn.execute("SELECT person_id, name FROM Persons")}
     threads = {r["id"]: dict(r) for r in conn.execute("SELECT id, platform, title FROM src.Threads")}
     msgs, skips, recovered = {}, [], 0
@@ -142,7 +143,7 @@ def load(conn):
         if text is None:
             skips.append((r["msg_id"], "empty"))
             continue
-        pid = person_of.get(r["author_id"])
+        pid = per_chat.get((r["author_id"], r["thread_id"]), person_of.get(r["author_id"]))
         msgs[r["msg_id"]] = {
             "id": r["msg_id"], "thread": r["thread_id"], "ts": ts, "text": text,
             "parent": r["parent_msg_id"], "person": pid,

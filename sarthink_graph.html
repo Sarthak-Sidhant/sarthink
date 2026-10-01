@@ -713,6 +713,58 @@
       color: #dde; }
     #convo .sum { padding: 10px 16px; font-size: .78rem; color: var(--mid); border-bottom: 1px solid var(--bdr); }
     @media (max-width: 700px) { #convo { inset: 4vh 4vw; } }
+
+    /* ── Person dossier ──────────────────────────────────────────────────── */
+    #dossier { position: fixed; left: 16px; top: 64px; bottom: 16px; width: min(380px, calc(100vw - 32px));
+      background: var(--gb); border: 1px solid var(--bdr); border-radius: 14px; backdrop-filter: blur(14px);
+      z-index: 160; display: none; flex-direction: column; overflow: hidden; }
+    #dossier.show { display: flex; }
+    #dossier .hd { padding: 14px; border-bottom: 1px solid var(--bdr); display: flex; gap: 8px; align-items: flex-start; }
+    #dossier .hd .nm { flex: 1; font-size: 1.05rem; font-weight: 600; color: #fff; }
+    #dossier .hd .sub { font-size: .72rem; color: var(--dim); margin-top: 2px; font-weight: 400; }
+    #dossier .body { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 14px; }
+    .ds-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .ds-stat { background: rgba(255,255,255,.04); border-radius: 10px; padding: 8px; }
+    .ds-stat .v { font-size: 1rem; font-weight: 600; color: #fff; }
+    .ds-stat .l { font-size: .66rem; color: var(--dim); }
+    .ds-h { font: 700 .62rem 'Orbitron', sans-serif; letter-spacing: .1em; color: var(--dim); margin-bottom: 6px; }
+    .ds-bars { display: flex; align-items: flex-end; gap: 2px; height: 70px; }
+    .ds-bars div { flex: 1; background: rgba(79,142,255,.35); border-radius: 2px 2px 0 0; position: relative; min-width: 2px; }
+    .ds-bars div span { position: absolute; bottom: 0; left: 0; right: 0; background: #FFD54A; opacity: .8; border-radius: 2px 2px 0 0; }
+    .ds-axis { display: flex; justify-content: space-between; font-size: .62rem; color: var(--dim); margin-top: 3px; }
+    .ds-theme { font-size: .8rem; padding: 7px 9px; border-radius: 9px; background: rgba(255,255,255,.03); }
+    .ds-theme b { color: #fff; } .ds-theme .n { color: var(--dim); font-size: .7rem; margin-left: 4px; }
+    .ds-theme .d { color: var(--mid); font-size: .74rem; margin-top: 2px; }
+    .ds-ex { display: inline-block; font-size: .68rem; margin: 4px 4px 0 0; padding: 2px 7px; border-radius: 999px;
+      border: 1px solid var(--bdr); color: var(--mid); cursor: pointer; }
+    .ds-ex:hover { color: #fff; border-color: rgba(79,142,255,.6); }
+    .ds-chat { font-size: .76rem; color: var(--mid); padding: 4px 0; cursor: pointer; }
+    .ds-chat:hover { color: #fff; }
+    .legend { font-size: .64rem; color: var(--dim); }
+    .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin: 0 3px 0 8px; vertical-align: 0; }
+
+    /* ── Inbox / on this day cards ───────────────────────────────────────── */
+    .card-h { font: 700 .66rem 'Orbitron', sans-serif; letter-spacing: .1em; color: var(--mid); margin-bottom: 8px; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .chips span { font-size: .72rem; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--bdr); cursor: pointer; color: var(--mid); }
+    .chips span.on { background: var(--acc); color: #fff; border-color: var(--acc); }
+    .ci { padding: 7px 0; border-top: 1px solid var(--bdr); font-size: .8rem; }
+    .ci .t { color: #fff; cursor: pointer; } .ci .t:hover { text-decoration: underline; }
+    .ci .m { font-size: .68rem; color: var(--dim); margin: 2px 0 4px; }
+    .ci .due { color: #FFD54A; }
+    .ci button { font-size: .66rem; padding: 2px 7px; margin-right: 4px; }
+    .ci.gone { opacity: .35; }
+    .yr { font: 600 .8rem 'Outfit'; color: #fff; margin: 10px 0 4px; display: flex; justify-content: space-between; }
+
+    /* ── Analyst: numbers behind an answer ───────────────────────────────── */
+    details.nums { margin-top: 8px; font-size: .76rem; color: var(--mid); }
+    details.nums summary { cursor: pointer; color: #cfe0ff; }
+    details.nums code { display: block; white-space: pre-wrap; font-size: .7rem; padding: 6px 8px; margin: 6px 0;
+      background: rgba(255,255,255,.05); border-radius: 6px; color: #b8c7e6; }
+    .bars { display: flex; flex-direction: column; gap: 3px; margin: 6px 0 10px; }
+    .bar { display: grid; grid-template-columns: 38% 1fr auto; gap: 6px; align-items: center; font-size: .72rem; }
+    .bar .l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar .t { height: 8px; border-radius: 4px; background: var(--acc); }
   </style>
 </head>
 
@@ -769,6 +821,8 @@
   <div id="chat">
     <div class="chat-hd">
       <div class="t">ASK YOUR MEMORY</div>
+      <button onclick="openInbox('me')" title="Promises and plans found in your chats">📥 Inbox</button>
+      <button onclick="openOnThisDay()" title="This day in earlier years">📅 On this day</button>
       <button onclick="clearChatHighlight()" title="Show the whole graph again">Reset view</button>
       <button onclick="toggleChat()" title="Hide">✕</button>
     </div>
@@ -789,6 +843,15 @@
     </div>
   </div>
   <button id="chat-toggle" onclick="toggleChat()">Ask your memory</button>
+
+  <!-- Person dossier -->
+  <div id="dossier">
+    <div class="hd">
+      <div class="nm" id="ds-name">—<div class="sub" id="ds-sub"></div></div>
+      <button class="btn" onclick="closeDossier()">✕</button>
+    </div>
+    <div class="body" id="ds-body"></div>
+  </div>
 
   <!-- Full conversation viewer -->
   <div id="convo">
@@ -1137,6 +1200,7 @@
       clearTimeout(S._toastTimer);
       S._toastTimer = setTimeout(() => $('toast').classList.remove('show'), 5000);
       showRelations(idx);
+      if (n.id.startsWith('P_') && n.group !== 'me') openDossier(n.id.slice(2));
     }
 
     function showRelations(nodeIdx) {
@@ -1946,6 +2010,7 @@
       const tools = (d.steps || []).filter(x => !['plan', 'verify'].includes(x.tool)).length;
       box.innerHTML = renderMd(d.answer) +
         (srcHtml ? `<div class="srcs">${srcHtml}</div>` : '') +
+        numbersHtml(d.steps) +
         `<div class="meta-line">${d.mode === 'multi' ? 'deep research · ' : ''}${tools} lookups · ${d.seconds}s</div>`;
       box.addEventListener('click', e => {
         const open = e.target.closest('.open');
@@ -2031,6 +2096,143 @@
 
     function toggleChat() { $('chat').classList.toggle('collapsed'); }
 
+    // ─── Commitments inbox ─────────────────────────────────────────────────────
+    async function openInbox(owner = 'me', box = null, offset = 0) {
+      $('chat').classList.remove('collapsed');
+      const sug = $('suggest'); if (sug) sug.remove();
+      box = box || addMsg('bot', '<span class="msg hint">Loading your inbox…</span>');
+      const d = await (await fetch(`/api/commitments?owner=${owner}&status=open&limit=25&offset=${offset}`)).json();
+      const label = { me: 'You promised', them: 'Promised to you', all: 'Everything' };
+      const items = d.items.map(it => `
+        <div class="ci" data-cid="${it.cid}">
+          <div class="t" data-session="${esc(it.session_id)}" data-nodes="${esc(JSON.stringify(it.nodes))}">${esc(it.title)}</div>
+          <div class="m">${it.owner === 'me' ? 'you' : esc(it.who || 'them')} · ${esc(it.platform)}${it.people.length ? ' · with ' + esc(it.people.slice(0, 3).join(', ')) : ''} · said ${esc(it.said_on)}${it.due ? ` · <span class="due">due ${esc(it.due)}</span>` : ''}</div>
+          <button class="btn" data-st="done">✓ Done</button><button class="btn" data-st="dismissed">✕ Dismiss</button>${it.due ? '<button class="btn" data-st="calendar">📅 Add to calendar</button>' : ''}
+        </div>`).join('');
+      box.innerHTML = `<div class="card-h">COMMITMENTS INBOX</div>
+        <div class="chips">${['me', 'them', 'all'].map(o => `<span data-owner="${o}" class="${o === owner ? 'on' : ''}">${label[o]}</span>`).join('')}</div>
+        <div class="m" style="font-size:.7rem;color:var(--dim)">${d.counts.total.toLocaleString()} open · ${d.counts.with_due} with a date · found in your chats, so double-check before acting</div>
+        ${items || '<div class="msg hint">Nothing open here.</div>'}
+        <div style="margin-top:8px;display:flex;gap:8px">
+          ${offset + 25 < d.counts.total ? '<button class="btn" data-more="1">Show more</button>' : ''}
+          <a class="btn" href="/api/commitments.ics" style="text-decoration:none">⬇ Calendar file (.ics)</a></div>`;
+      box.onclick = async e => {
+        const chip = e.target.closest('[data-owner]'); if (chip) return openInbox(chip.dataset.owner, box);
+        if (e.target.dataset.more) return openInbox(owner, box, offset + 25);
+        const t = e.target.closest('.t[data-session]');
+        if (t) { highlightNodes(JSON.parse(t.dataset.nodes)); return openConvo(t.dataset.session); }
+        const b = e.target.closest('[data-st]');
+        if (b) {
+          const row = b.closest('.ci');
+          await fetch(`/api/commitments/${row.dataset.cid}`, { method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ status: b.dataset.st }) });
+          row.classList.add('gone');
+          row.querySelectorAll('button').forEach(x => x.disabled = true);
+          if (b.dataset.st === 'calendar') b.textContent = '📅 Added';
+        }
+      };
+    }
+
+    // ─── On this day + day review ──────────────────────────────────────────────
+    async function openOnThisDay(date = null) {
+      $('chat').classList.remove('collapsed');
+      const sug = $('suggest'); if (sug) sug.remove();
+      const box = addMsg('bot', '<span class="msg hint">Looking back…</span>');
+      const d = await (await fetch('/api/on_this_day' + (date ? `?date=${date}` : ''))).json();
+      const md = d.date.slice(5);
+      const years = Object.entries(d.years).map(([y, list]) => `
+        <div class="yr"><span>${y}</span><button class="btn" data-review="${y}-${md}">Review this day</button></div>
+        ${list.slice(0, 4).map(it => `<div class="ci"><div class="t" data-session="${esc(it.session_id)}">${esc(it.header)}</div>
+          <div class="m">${esc(it.time.slice(11))} · ${it.messages} messages</div>
+          ${it.summary ? `<div style="font-size:.74rem;color:var(--mid)">${esc(it.summary.slice(0, 220))}${it.summary.length > 220 ? '…' : ''}</div>` : ''}</div>`).join('')}`).join('');
+      box.innerHTML = `<div class="card-h">ON THIS DAY · ${esc(new Date(d.date).toLocaleDateString(undefined, { day: 'numeric', month: 'long' }))}</div>
+        <input type="date" value="${d.date}" style="background:transparent;color:#fff;border:1px solid var(--bdr);border-radius:6px;padding:2px 6px;margin-bottom:6px">
+        ${years || '<div class="msg hint">No conversations on this date in earlier years.</div>'}`;
+      box.querySelector('input').onchange = e => { box.remove(); openOnThisDay(e.target.value); };
+      const nodes = Object.values(d.years).flat().flatMap(it => it.nodes);
+      if (nodes.length) highlightNodes(nodes);
+      box.onclick = async e => {
+        const t = e.target.closest('.t[data-session]'); if (t) return openConvo(t.dataset.session);
+        const r = e.target.dataset.review;
+        if (r) {
+          const out = addMsg('bot', `<span class="msg hint">Writing a review of ${r}…</span>`);
+          const v = await (await fetch(`/api/day_review?date=${r}`, { method: 'POST' })).json();
+          out._sources = v.sources.map(s => ({ ...s, n: s.n, nodes: s.nodes }));
+          out.innerHTML = `<div class="card-h">DAY REVIEW · ${esc(r)}</div>` + renderMd(v.review) +
+            `<div class="srcs">${v.sources.map(s => `<div class="src" data-n="${s.n}"><b>[${s.n}]</b>${esc(s.header)}<span class="d">${esc(s.time.slice(11))}</span>
+              <div class="sn">${esc(s.summary || '')}</div><button class="btn open" data-session="${esc(s.session_id)}">Open conversation</button></div>`).join('')}</div>`;
+          out.addEventListener('click', ev => {
+            const o = ev.target.closest('.open'); if (o) { ev.stopPropagation(); return openConvo(o.dataset.session); }
+            const c = ev.target.closest('[data-n]'); if (c) focusSource(out, c.dataset.n);
+          });
+          highlightNodes(v.sources.flatMap(s => s.nodes));
+        }
+      };
+    }
+
+    // ─── Analyst: show the SQL + numbers + a bar chart behind an answer ─────────
+    function numbersHtml(steps) {
+      const qs = (steps || []).filter(x => x.tool === 'run_sql' && x.result && x.result.rows && x.result.rows.length);
+      if (!qs.length) return '';
+      const parts = qs.map(x => {
+        const { columns, rows } = x.result;
+        const cols = columns.filter(c => c !== 'n');
+        const ci = cols.map(c => columns.indexOf(c));
+        const shown = rows.slice(0, 12);
+        let chart = '';
+        const numCol = ci.slice(1).find(i => shown.every(r => typeof r[i] === 'number'));
+        if (shown.length >= 2 && numCol !== undefined) {
+          const max = Math.max(...shown.map(r => r[numCol]), 1);
+          chart = '<div class="bars">' + shown.map(r => `<div class="bar"><span class="l">${esc(r[ci[0]])}</span>` +
+            `<span class="t" style="width:${Math.max(2, 100 * r[numCol] / max)}%"></span><span>${Number(r[numCol]).toLocaleString()}</span></div>`).join('') + '</div>';
+        }
+        const table = '<table><tr>' + cols.map(c => `<th>${esc(c)}</th>`).join('') + '</tr>' +
+          shown.map(r => '<tr>' + ci.map(i => `<td>${esc(r[i] ?? '')}</td>`).join('') + '</tr>').join('') + '</table>' +
+          (rows.length > 12 ? `<div class="legend">… ${rows.length - 12} more rows</div>` : '');
+        return `<code>${esc(x.args.sql || '')}</code>${chart || table}`;
+      });
+      return `<details class="nums"><summary>📊 How these numbers were computed (${qs.length} ${qs.length > 1 ? 'queries' : 'query'})</summary>${parts.join('')}</details>`;
+    }
+
+    // ─── Person dossier ───────────────────────────────────────────────────────
+    async function openDossier(pid) {
+      $('dossier').classList.add('show');
+      $('ds-name').firstChild.textContent = 'Loading…';
+      $('ds-sub').textContent = ''; $('ds-body').innerHTML = '<div class="msg hint">Reading your history together…</div>';
+      try {
+        const d = await (await fetch(`/api/person/${pid}/dossier`)).json();
+        $('ds-name').firstChild.textContent = d.name;
+        $('ds-sub').textContent = `${d.platforms || ''} · ${d.first_day || '?'} → ${d.last_day || '?'}`;
+        const pct = d.messages_total ? Math.round(100 * d.messages_by_you / d.messages_total) : 0;
+        const max = Math.max(...d.months.map(m => m.total), 1);
+        const bars = d.months.map(m => `<div title="${m.month}: ${m.total} messages (${m.you} yours)" style="height:${100 * m.total / max}%">` +
+          `<span style="height:${m.total ? 100 * m.you / m.total : 0}%"></span></div>`).join('');
+        const themes = d.themes.map(t => `<div class="ds-theme"><b>${esc(t.theme)}</b><span class="n">${t.sessions} chats</span>
+          <div class="d">${esc(t.description || '')}</div>
+          ${t.examples.map(e => `<span class="ds-ex" data-session="${esc(e.session_id)}" title="${esc(e.summary || '')}">${esc(e.date)}</span>`).join('')}</div>`).join('');
+        const chats = d.top_chats.map(c => `<div class="ds-chat" data-node="${esc(c.node)}">${esc(c.platform)} · ${esc(c.title)} — ${c.messages.toLocaleString()} msgs</div>`).join('');
+        $('ds-body').innerHTML = `
+          <div class="ds-stats">
+            <div class="ds-stat"><div class="v">${(d.messages_total || 0).toLocaleString()}</div><div class="l">messages together</div></div>
+            <div class="ds-stat"><div class="v">${pct}%</div><div class="l">written by you</div></div>
+            <div class="ds-stat"><div class="v">${d.months.length}</div><div class="l">active months</div></div>
+          </div>
+          <div><div class="ds-h">ACTIVITY OVER TIME <span class="legend"><i style="background:rgba(79,142,255,.6)"></i>them<i style="background:#FFD54A"></i>you</span></div>
+            <div class="ds-bars">${bars}</div>
+            <div class="ds-axis"><span>${d.months[0]?.month || ''}</span><span>${d.months.at(-1)?.month || ''}</span></div></div>
+          ${themes ? `<div><div class="ds-h">WHAT YOU TALK ABOUT</div>${themes}</div>` : ''}
+          ${chats ? `<div><div class="ds-h">WHERE YOU TALK</div>${chats}</div>` : ''}
+          <button class="btn" id="ds-ask">Ask about ${esc(d.name)} →</button>`;
+        $('ds-body').onclick = e => {
+          const ex = e.target.closest('.ds-ex'); if (ex) return openConvo(ex.dataset.session);
+          const ch = e.target.closest('.ds-chat'); if (ch) return highlightNodes([d.node, ch.dataset.node]);
+          if (e.target.id === 'ds-ask') { $('chat').classList.remove('collapsed'); sendChat(`Tell me about my friendship with ${d.name}`); }
+        };
+        highlightNodes([d.node, ...d.top_chats.map(c => c.node)]);
+      } catch (e) { $('ds-body').innerHTML = `<span style="color:#ff8080">Could not load: ${esc(e.message)}</span>`; }
+    }
+    function closeDossier() { $('dossier').classList.remove('show'); }
+
     function initChat() {
       $('chat-in').addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
@@ -2089,7 +2291,7 @@
         toggleOrbit, toggleDim, toggleRecord, toggleCycle,
         showAll, hideAll, onSearch, onDepthChange, shift, setSpeed, clickGroup,
         startRecord, stopRecord, closeRecModal,
-        sendChat, toggleChat, clearChatHighlight, closeConvo
+        sendChat, toggleChat, clearChatHighlight, closeConvo, closeDossier, openDossier, openInbox, openOnThisDay
       });
       initChat();
 

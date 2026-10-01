@@ -9,6 +9,7 @@
 
 Usage: python3 scripts/index/build_identity.py
 """
+import datetime as dt
 import json
 import re
 import sqlite3
@@ -20,10 +21,22 @@ SCHEMA = """
 DROP TABLE IF EXISTS Persons;
 DROP TABLE IF EXISTS PersonAliases;
 DROP TABLE IF EXISTS MergeCandidates;
+DROP TABLE IF EXISTS PersonThreads;
+CREATE TABLE PersonThreads (           -- per-chat person for placeholder accounts (overrides PersonAliases)
+    user_id INTEGER, thread_id INTEGER, person_id INTEGER,
+    PRIMARY KEY (user_id, thread_id)
+);
+CREATE TABLE IF NOT EXISTS PersonNameGuesses (   -- kept across rebuilds; filled by suggest_names.py
+    user_id INTEGER, thread_id INTEGER, name TEXT, evidence TEXT,
+    PRIMARY KEY (user_id, thread_id)
+);
 CREATE TABLE Persons (
     person_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    is_me INTEGER NOT NULL DEFAULT 0
+    is_me INTEGER NOT NULL DEFAULT 0,
+    placeholder INTEGER NOT NULL DEFAULT 0,   -- deleted/deactivated account, one person per chat
+    platform TEXT,
+    message_count INTEGER DEFAULT 0
 );
 CREATE TABLE PersonAliases (
     user_id INTEGER PRIMARY KEY,      -- src.Users.id
@@ -78,6 +91,33 @@ def display_name_for(platform, raw_id, display_name, tw_names):
     return dn or raw_id or "unknown"
 
 
+PLACEHOLDER_NAMES = {"instagram user", "deleted user", "facebook user"}
+
+
+def is_placeholder(u):
+    dn, rid = str(u["display_name"] or "").lower(), str(u["raw_id"] or "").lower()
+    return dn in PLACEHOLDER_NAMES or rid.startswith("deleted_user") or dn.startswith("deleted_user")
+
+
+def _span(t0, t1):
+    if not t0:
+        return "unknown dates"
+    f = lambda t: dt.datetime.fromtimestamp(t, dt.timezone(dt.timedelta(hours=5, minutes=30))).strftime("%b %Y")  # noqa: E731
+    return f(t0) if f(t0) == f(t1) else f"{f(t0)} – {f(t1)}"
+
+
+def placeholder_name(u, t0, t1, title):
+    plat = u["platform"]
+    rid = str(u["raw_id"] or "").lower()
+    if plat == "reddit":
+        if "room" in rid or (title or "").lower().startswith("dm"):
+            return f"Deleted Reddit user (DM, {_span(t0, t1)})"
+        return f"Deleted Reddit user (in “{(title or 'a thread')[:32]}”)"
+    label = {"instagram": "Deactivated Instagram account", "facebook": "Deactivated Facebook account",
+             "discord": "Deleted Discord user"}.get(plat, f"Deleted {plat} user")
+    return f"{label} ({_span(t0, t1)})"
+
+
 def build():
     with open(IDENTITY_MAP) as f:
         idmap = json.load(f)
@@ -89,7 +129,7 @@ def build():
     conn.executescript(SCHEMA)
     conn.execute("INSERT INTO Persons(person_id, name, is_me) VALUES (1, ?, 1)", (me_name,))
 
-    users = conn.execute("SELECT id, platform, raw_id, display_name FROM src.Users").fetchall()
+    users = conn.execute("SELECT id, platform, raw_id, display_name FROM src.Users ORDER BY id").fetchall()
 
     # Strong keys (account id, twitter screen name) always identify the owner. A display-name
     # match only counts if exactly one account on that platform carries that name, since
@@ -129,6 +169,45 @@ def build():
             by_norm[norm].append((u["id"], u["platform"]))
 
     conn.executemany("INSERT INTO PersonAliases VALUES (?,?,?,?,?)", alias_rows)
+
+    # Placeholder accounts ("Instagram User", "Deleted User", deleted_user_*): one person per chat with an
+    # honest, distinct name. The first chat keeps the account's person id; extra chats get new ids (appended,
+    # so every other person's id is unchanged).
+    pid_of = {r[0]: r[1] for r in alias_rows}
+    guesses = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, name FROM PersonNameGuesses")}
+    split = 0
+    for u in users:
+        if u["id"] in me_ids or not is_placeholder(u):
+            continue
+        chats = conn.execute("""SELECT m.thread_id, MIN(m.timestamp_utc), MAX(m.timestamp_utc), t.title
+            FROM src.Messages m JOIN src.Threads t ON t.id = m.thread_id WHERE m.author_id = ?
+            GROUP BY m.thread_id ORDER BY MIN(m.timestamp_utc)""", (u["id"],)).fetchall()
+        for i, (tid, t0, t1, title) in enumerate(chats):
+            name = guesses.get((u["id"], tid)) or placeholder_name(u, t0, t1, title)
+            if i == 0:
+                pid = pid_of[u["id"]]
+                conn.execute("UPDATE Persons SET name = ?, placeholder = 1 WHERE person_id = ?", (name, pid))
+                conn.execute("UPDATE PersonAliases SET name = ? WHERE user_id = ?", (name, u["id"]))
+            else:
+                pid = next_pid
+                next_pid += 1
+                conn.execute("INSERT INTO Persons(person_id, name, placeholder) VALUES (?,?,1)", (pid, name))
+                split += 1
+            conn.execute("INSERT INTO PersonThreads VALUES (?,?,?)", (u["id"], tid, pid))
+
+    # per-person message counts and platform (used for name lookup, incl. split placeholder people)
+    conn.executescript("""
+        UPDATE Persons SET platform = (SELECT MIN(a.platform) FROM PersonAliases a WHERE a.person_id = Persons.person_id);
+        CREATE TEMP TABLE pc AS
+          SELECT COALESCE(pt.person_id, a.person_id) AS pid, COUNT(*) AS n
+          FROM src.Messages m JOIN PersonAliases a ON a.user_id = m.author_id
+          LEFT JOIN PersonThreads pt ON pt.user_id = m.author_id AND pt.thread_id = m.thread_id
+          GROUP BY pid;
+        UPDATE Persons SET message_count = COALESCE((SELECT n FROM pc WHERE pc.pid = Persons.person_id), 0);
+        UPDATE Persons SET platform = (SELECT MIN(t.platform) FROM PersonThreads pt JOIN src.Threads t ON t.id = pt.thread_id
+                                       WHERE pt.person_id = Persons.person_id) WHERE platform IS NULL;
+    """)
+    print(f"Placeholder accounts split into {split} extra per-chat people")
     cands = [
         (n, json.dumps([i for i, _ in v]), json.dumps(sorted({p for _, p in v})))
         for n, v in by_norm.items()

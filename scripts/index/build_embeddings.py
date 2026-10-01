@@ -16,9 +16,9 @@ import time
 
 import numpy as np
 
-from common import REPO_ROOT, connect_index
+from common import INDEX_DIR, connect_index
 
-OUT_DIR = REPO_ROOT / "processed_data" / "index"
+OUT_DIR = INDEX_DIR
 
 
 def slug(model):

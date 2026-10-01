@@ -23,8 +23,11 @@ from pathlib import Path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = Path(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 
-NODES_CSV = str(REPO_ROOT / 'processed_data' / 'graph' / 'cosmograph_nodes.csv')
-EDGES_CSV = str(REPO_ROOT / 'processed_data' / 'graph' / 'cosmograph_edges.csv')
+sys.path.insert(0, str(REPO_ROOT / 'scripts' / 'index'))
+from common import GRAPH_DIR  # noqa: E402
+
+NODES_CSV = str(GRAPH_DIR / 'cosmograph_nodes.csv')
+EDGES_CSV = str(GRAPH_DIR / 'cosmograph_edges.csv')
 
 random.seed(42)   # deterministic jitter
 

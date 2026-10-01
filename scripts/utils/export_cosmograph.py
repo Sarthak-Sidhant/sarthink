@@ -21,7 +21,7 @@ from pathlib import Path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = Path(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "index"))
-from common import connect_index  # noqa: E402
+from common import GRAPH_DIR, connect_index  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -43,7 +43,7 @@ GROUP_COLORS = {
     "facebook_dm_group":       "#CFD8DC",
 }
 
-OUT_DIR = REPO_ROOT / "processed_data" / "graph"
+OUT_DIR = GRAPH_DIR
 
 
 def thread_group(platform, title, platform_thread_id):
@@ -69,6 +69,7 @@ def clean(s, n=None):
 def export():
     conn = connect_index()
     person_of = {r["user_id"]: r["person_id"] for r in conn.execute("SELECT user_id, person_id FROM PersonAliases")}
+    per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
     persons = {r["person_id"]: dict(r) for r in conn.execute("SELECT person_id, name, is_me FROM Persons")}
     user_platform = {r["id"]: r["platform"] for r in conn.execute("SELECT id, platform FROM src.Users")}
 
@@ -76,7 +77,7 @@ def export():
     person_platform = {}
     for author_id, thread_id, n in conn.execute(
             "SELECT author_id, thread_id, COUNT(*) FROM src.Messages GROUP BY author_id, thread_id"):
-        pid = person_of.get(author_id)
+        pid = per_chat.get((author_id, thread_id), person_of.get(author_id))
         if pid is None:
             continue
         weights[(pid, thread_id)] += n
@@ -92,6 +93,14 @@ def export():
         p = persons[pid]
         group = "me" if p["is_me"] else f"{person_platform[pid]}_user"
         nodes.append((f"P_{pid}", clean(p["name"]), group, size[f"P_{pid}"], GROUP_COLORS.get(group, "#aaaaaa")))
+
+    # identical labels for different people (e.g. many deleted accounts) get #2, #3… in the graph only
+    seen = defaultdict(int)
+    for i in sorted(range(len(nodes)), key=lambda i: -nodes[i][3]):     # biggest keeps the plain label
+        nid, label, group, weight, color = nodes[i]
+        seen[label] += 1
+        if seen[label] > 1:
+            nodes[i] = (nid, f"{label} #{seen[label]}", group, weight, color)
 
     thread_ids = {t for _, t in weights}
     for r in conn.execute("SELECT id, platform, title, platform_thread_id FROM src.Threads"):

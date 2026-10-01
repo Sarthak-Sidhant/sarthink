@@ -149,7 +149,8 @@ TOOLS = [
             "Read-only SQLite SELECT for counts and stats. Views:\n"
             "  messages(msg_id, person_id, person, is_me, platform, thread_id, thread, ts, day, content)\n"
             "    one row per message; is_me=1 for Sarthak; ts = unix seconds UTC; day = 'YYYY-MM-DD' (IST)\n"
-            "  people(person_id, name, is_me, platform)\n"
+            "  people(person_id, name, is_me, platform, placeholder, message_count)  placeholder=1: deleted/"
+            "deactivated account (one per chat; may carry a guessed name ending in '?')\n"
             "  threads(thread_id, platform, title, is_dm)\n"
             "Sarthak's person_id is 1. Example — who he talks with most in DMs:\n"
             "  SELECT o.person, COUNT(*) n FROM messages o JOIN threads t USING(thread_id) WHERE t.is_dm=1 "
@@ -207,8 +208,7 @@ class SqlTool:
         self.conn.execute(f"ATTACH DATABASE 'file:{SRC_DB}?mode=ro' AS src")
         self.conn.executescript("""
             CREATE TEMP VIEW people AS
-              SELECT p.person_id, p.name, p.is_me, MIN(a.platform) AS platform
-              FROM Persons p JOIN PersonAliases a USING(person_id) GROUP BY p.person_id;
+              SELECT person_id, name, is_me, platform, placeholder, message_count FROM Persons;
             CREATE TEMP VIEW threads AS
               SELECT id AS thread_id, platform, title,
                      CASE WHEN platform = 'discord' OR lower(title) LIKE 'dm%'
@@ -216,7 +216,7 @@ class SqlTool:
                                OR platform_thread_id LIKE '%:reddit.com%' THEN 1 ELSE 0 END AS is_dm
               FROM src.Threads;
             CREATE TEMP VIEW messages AS
-              SELECT m.msg_id, a.person_id, p.name AS person, p.is_me, t.platform, m.thread_id, t.title AS thread,
+              SELECT m.msg_id, p.person_id, p.name AS person, p.is_me, t.platform, m.thread_id, t.title AS thread,
                      t2.ts AS ts, date(t2.ts, 'unixepoch', '+330 minutes') AS day, m.content
               FROM src.Messages m
               JOIN (SELECT msg_id,
@@ -225,7 +225,9 @@ class SqlTool:
                                          THEN ((CAST(substr(msg_id, 9) AS INTEGER) >> 22) + 1288834974657) / 1000 END) AS ts
                     FROM src.Messages) t2 ON t2.msg_id = m.msg_id   -- null tweet times recovered from Snowflake ids
               JOIN PersonAliases a ON a.user_id = m.author_id
-              JOIN Persons p ON p.person_id = a.person_id JOIN src.Threads t ON t.id = m.thread_id;
+              LEFT JOIN PersonThreads pt ON pt.user_id = m.author_id AND pt.thread_id = m.thread_id
+              JOIN Persons p ON p.person_id = COALESCE(pt.person_id, a.person_id)
+              JOIN src.Threads t ON t.id = m.thread_id;
         """)
         self.conn.set_authorizer(self._authorize)
         self.lock = threading.Lock()
@@ -267,7 +269,7 @@ belong to 2 themes; skip one-off noise). Order themes by number of sessions. Ret
 
 {lines}"""
 
-PROFILE_CACHE = REPO_ROOT / "processed_data" / "db" / "profile_cache.db"
+from common import PROFILE_CACHE  # noqa: E402
 
 
 class PersonProfiles:
@@ -338,7 +340,7 @@ class PersonProfiles:
                 "sessions_summarized": len(sessions), "themes": themes}
 
 
-NOTES_DB = REPO_ROOT / "processed_data" / "db" / "user_notes.db"
+from common import USER_DB as NOTES_DB  # noqa: E402
 
 
 class NotesStore:
