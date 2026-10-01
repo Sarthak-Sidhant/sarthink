@@ -1,4 +1,4 @@
-// Ask: chat on the left; the selected answer drives the graph highlight and the sources pane on the right.
+// Ask: chat on the left; the selected answer drives the stage (map / 3D focus) and the sources pane on the right.
 import { $, esc, markdown, dot, num, platformLabel, sessionTitle } from './util.js';
 import { renderReader } from './reader.js';
 
@@ -11,8 +11,8 @@ const SUGGESTIONS = [
 const STORE = 'sarthink.chat.v1';
 
 export class Chat {
-  constructor(graph) {
-    this.graph = graph; this.turns = []; this.busy = false; this.sel = null;
+  constructor(stage) {
+    this.stage = stage; this.turns = []; this.busy = false; this.sel = null;
     this.log = $('chat-log'); this.input = $('chat-in');
     $('suggest').innerHTML = SUGGESTIONS.map(s => `<button type="button">${esc(s)}</button>`).join('');
     $('suggest').addEventListener('click', e => { const b = e.target.closest('button'); if (b) this.ask(b.textContent); });
@@ -72,7 +72,7 @@ export class Chat {
           if (ev.type === 'step') {
             turn.steps.push(ev.text);
             (ev.nodes || []).forEach(n => seen.add(n));
-            if (seen.size) this.graph.highlight([...seen], { fly: false });   // the graph lights up as it reads
+            if (seen.size) this.stage.highlight([...seen], { fly: false });   // the map lights up as it reads
             this.paintProgress(turn);
           } else if (ev.type === 'answer') turn.data = ev.data;
           else if (ev.type === 'error') throw new Error(ev.message);
@@ -127,9 +127,8 @@ export class Chat {
     this.log.querySelectorAll('.a.selected').forEach(x => x.classList.remove('selected'));
     turn.el?.querySelector('.a').classList.add('selected');
     this.renderSources();
-    const nodes = [...new Set((turn.data?.sources || []).flatMap(s => s.nodes))];
-    if (nodes.length) this.graph.highlight(nodes, { fly }); else this.graph.clear();
-    $('graph-clear').hidden = !nodes.length;
+    const srcs = turn.data?.sources || [];
+    if (srcs.length) this.stage.showSources(srcs); else if (fly) this.stage.clear();
   }
 
   renderSources(activeN = null) {
@@ -152,8 +151,7 @@ export class Chat {
   focusSource(n) {
     const s = (this.sel?.data?.sources || []).find(x => x.n === +n);
     if (!s) return;
-    const all = [...new Set(this.sel.data.sources.flatMap(x => x.nodes))];
-    this.graph.highlight(all, { focus: s.nodes });
+    this.stage.focusSession(s.session_id);
     this.log.querySelectorAll('.cite.on').forEach(c => c.classList.remove('on'));
     this.sel.el.querySelectorAll(`.cite[data-n="${n}"]`).forEach(c => c.classList.add('on'));
     if (!$('sources-body').querySelector('.src')) this.renderSources(+n);
@@ -181,7 +179,7 @@ export class Chat {
     renderReader($('sources-body'), sessionId, {
       backLabel: this.sel ? 'All sources' : 'Back',
       onBack: () => this.renderSources(),
-      onNodes: nodes => { this.graph.highlight(nodes); $('graph-clear').hidden = false; },
+      onNodes: (nodes, s) => this.stage.showSession(s),
     });
   }
 
@@ -207,7 +205,7 @@ export class Chat {
     this.turns = []; this.sel = null;
     this.log.querySelectorAll('.turn').forEach(t => t.remove());
     $('chat-empty').hidden = false;
-    this.renderSources(); this.graph.clear(); $('graph-clear').hidden = true;
+    this.renderSources(); this.stage.clear();
     this.save(); this.focus();
   }
 

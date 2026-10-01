@@ -51,15 +51,18 @@ function rgba(s) {
   return [0.5, 0.5, 0.5, 1];
 }
 
-// points: a solid core with a soft halo, so clusters read as glowing clouds
+// Level of detail: every node/edge carries a "lod" weight (its message count); anything under u_lod is
+// pushed off-screen in the vertex shader, so zooming out shows the meaningful skeleton, zooming in the rest.
+// points: solid core, darker rim for contrast, a faint halo
 const VS_POINTS = `
-attribute vec2 a_pos; attribute vec4 a_col; attribute float a_size;
-uniform vec2 u_center; uniform float u_scale; uniform vec2 u_half; uniform float u_dpr; uniform float u_zoom; uniform float u_dim;
+attribute vec2 a_pos; attribute vec4 a_col; attribute float a_size; attribute float a_lod;
+uniform vec2 u_center; uniform float u_scale; uniform vec2 u_half; uniform float u_dpr; uniform float u_zoom; uniform float u_dim; uniform float u_lod;
 varying vec4 v_col; varying float v_px;
 void main() {
+  if (a_lod < u_lod) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; v_col = vec4(0.0); v_px = 1.0; return; }
   vec2 p = (a_pos - u_center) * u_scale / u_half;
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
-  float px = max(2.0, a_size * u_zoom * 2.0) * u_dpr * 1.9;
+  float px = max(2.4, a_size * u_zoom * 2.0) * u_dpr * 1.5;
   gl_PointSize = px; v_px = px;
   v_col = vec4(a_col.rgb, a_col.a * u_dim);
 }`;
@@ -69,19 +72,23 @@ varying vec4 v_col; varying float v_px;
 void main() {
   float d = length(gl_PointCoord * 2.0 - 1.0);
   float edge = 2.0 / v_px;
-  float core = 1.0 - smoothstep(0.52 - edge, 0.52 + edge, d);
-  float halo = (1.0 - smoothstep(0.0, 1.0, d)) * 0.28;
+  float core = 1.0 - smoothstep(0.66 - edge, 0.66 + edge, d);
+  float rim = smoothstep(0.46, 0.62, d) * core;
+  float halo = (1.0 - smoothstep(0.6, 1.0, d)) * 0.16;
   float a = v_col.a * max(core, halo);
   if (a <= 0.004) discard;
-  vec3 rgb = mix(v_col.rgb, vec3(1.0), 0.12 * (1.0 - d));
+  vec3 rgb = mix(v_col.rgb, v_col.rgb * 0.62, rim);
   gl_FragColor = vec4(rgb * a, a);
 }`;
 // edges: coloured by their endpoints' platforms, very faint
 const VS_LINES = `
-attribute vec2 a_pos; attribute vec4 a_col;
-uniform vec2 u_center; uniform float u_scale; uniform vec2 u_half;
+attribute vec2 a_pos; attribute vec4 a_col; attribute float a_lod;
+uniform vec2 u_center; uniform float u_scale; uniform vec2 u_half; uniform float u_lod;
 varying vec4 v_col;
-void main() { vec2 p = (a_pos - u_center) * u_scale / u_half; gl_Position = vec4(p.x, -p.y, 0.0, 1.0); v_col = a_col; }`;
+void main() {
+  if (a_lod < u_lod) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); v_col = vec4(0.0); return; }
+  vec2 p = (a_pos - u_center) * u_scale / u_half; gl_Position = vec4(p.x, -p.y, 0.0, 1.0); v_col = a_col;
+}`;
 const FS_LINES = `
 precision mediump float; uniform float u_alpha; varying vec4 v_col;
 void main() { gl_FragColor = vec4(v_col.rgb * u_alpha, u_alpha); }`;
@@ -144,6 +151,10 @@ export class Graph {
         : 0.9 + Math.min(2, Math.log1p(this.size[i]) * 0.18);
     }
     if (this.me >= 0) this.r[this.me] = 7;
+    // lod weight: people need 2+ messages, chats 3+, to appear at the overview zoom
+    this.lod = new Float32Array(n);
+    for (let i = 0; i < n; i++) this.lod[i] = this.isPerson[i] ? this.size[i] : this.size[i] / 1.5;
+    if (this.me >= 0) this.lod[this.me] = 1e9;
     this.byImportance = [];
     for (let i = 0; i < n; i++) if (this.isPerson[i]) this.byImportance.push(i);
     this.byImportance.sort((a, b) => this.size[b] - this.size[a]);
@@ -231,12 +242,17 @@ export class Graph {
     this.order = order;
     const pos = new Float32Array(order.length * 2), sz = new Float32Array(order.length);
     order.forEach((i, k) => { pos[k * 2] = this.x[i]; pos[k * 2 + 1] = this.y[i]; sz[k] = this.r[i]; });
-    this.bufPos = this._buf(pos); this.bufSize = this._buf(sz);
+    const lod = new Float32Array(order.length);
+    order.forEach((i, k) => { lod[k] = this.lod[i]; });
+    this.bufPos = this._buf(pos); this.bufSize = this._buf(sz); this.bufLod = this._buf(lod);
     const lp = new Float32Array(this.es.length * 4);
     for (let k = 0; k < this.es.length; k++) {
       lp[k * 4] = this.x[this.es[k]]; lp[k * 4 + 1] = this.y[this.es[k]]; lp[k * 4 + 2] = this.x[this.ed[k]]; lp[k * 4 + 3] = this.y[this.ed[k]];
     }
     this.bufLines = this._buf(lp);
+    const ll = new Float32Array(this.es.length * 2);
+    for (let k = 0; k < this.es.length; k++) ll[k * 2] = ll[k * 2 + 1] = Math.min(this.lod[this.es[k]], this.lod[this.ed[k]]);
+    this.bufLineLod = this._buf(ll);
     this.themeChanged(false);
   }
   _buf(data) { const gl = this.gl, b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); return b; }
@@ -255,7 +271,7 @@ export class Graph {
       const col = new Float32Array(this.order.length * 4);
       this.order.forEach((i, k) => {
         const c = platRGB[this.plat[i]] || platRGB.other;
-        col.set([c[0], c[1], c[2], this.isPerson[i] ? 0.92 : 0.42], k * 4);
+        col.set([c[0], c[1], c[2], this.isPerson[i] ? 1 : 0.6], k * 4);
       });
       // each edge end takes its node's platform colour, so fans read as soft colour, not a grey wedge
       const lc = new Float32Array(this.es.length * 8);
@@ -285,14 +301,17 @@ export class Graph {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.enableVertexAttribArray(pr.a[name]); gl.vertexAttribPointer(pr.a[name], size, gl.FLOAT, false, 0, 0);
     };
     common(this.L);
-    gl.uniform1f(this.L.u.u_alpha, this.colors.edgeAlpha * (dim ? 0.35 : 1));
-    attr(this.L, 'a_pos', this.bufLines, 2); attr(this.L, 'a_col', this.bufLineCol, 4);
+    const lodT = this.lodThreshold();
+    gl.uniform1f(this.L.u.u_alpha, this.colors.edgeAlpha * (dim ? 0.12 : 1));
+    gl.uniform1f(this.L.u.u_lod, lodT);
+    attr(this.L, 'a_pos', this.bufLines, 2); attr(this.L, 'a_col', this.bufLineCol, 4); attr(this.L, 'a_lod', this.bufLineLod, 1);
     gl.drawArrays(gl.LINES, 0, this.es.length * 2);
     for (const a of Object.values(this.L.a)) gl.disableVertexAttribArray(a);
     const P = this.P;
     common(P);
-    gl.uniform1f(P.u.u_dpr, this.dpr); gl.uniform1f(P.u.u_zoom, this.zoomFactor()); gl.uniform1f(P.u.u_dim, dim ? 0.22 : 1);
-    attr(P, 'a_pos', this.bufPos, 2); attr(P, 'a_col', this.bufCol, 4); attr(P, 'a_size', this.bufSize, 1);
+    gl.uniform1f(P.u.u_dpr, this.dpr); gl.uniform1f(P.u.u_zoom, this.zoomFactor()); gl.uniform1f(P.u.u_dim, dim ? 0.07 : 1);
+    gl.uniform1f(P.u.u_lod, lodT);
+    attr(P, 'a_pos', this.bufPos, 2); attr(P, 'a_col', this.bufCol, 4); attr(P, 'a_size', this.bufSize, 1); attr(P, 'a_lod', this.bufLod, 1);
     gl.drawArrays(gl.POINTS, 0, this.order.length);
     for (const a of Object.values(P.a)) gl.disableVertexAttribArray(a);
   }
@@ -307,6 +326,9 @@ export class Graph {
     this.glDirty = true; this.draw();
   }
   toScreen(i) { const v = this.view; return [(this.x[i] - v.cx) * v.s + this.w / 2, (this.y[i] - v.cy) * v.s + this.h / 2]; }
+  // zoomed out: only the meaningful skeleton; each doubling of zoom halves the cut until everything shows
+  lodThreshold() { const k = this.view.s / (this.fitScale || this.view.s); return k >= 3 ? 0 : 2 / Math.max(1, k); }
+  visibleCount() { const t = this.lodThreshold(); let c = 0; for (let i = 0; i < this.n; i++) if (this.lod[i] >= t) c++; return c; }
   zoomFactor() { return Math.max(0.6, Math.min(3.2, Math.sqrt(this.view.s / (this.fitScale || this.view.s)))); }
   setView(v) { this.view = v; this.glDirty = true; this.draw(); }
 
@@ -491,7 +513,7 @@ export class Graph {
   pick(mx, my) {
     if (!this.n || !this.w) return -1;
     const v = this.view, wx = (mx - this.w / 2) / v.s + v.cx, wy = (my - this.h / 2) / v.s + v.cy;
-    const rad = 14 / v.s, g = this.grid, z = this.zoomFactor();
+    const rad = 14 / v.s, g = this.grid, z = this.zoomFactor(), lodT = this.lodThreshold();
     const cx0 = Math.max(0, Math.floor((wx - rad - g.x0) / g.cw)), cx1 = Math.min(g.cells - 1, Math.floor((wx + rad - g.x0) / g.cw));
     const cy0 = Math.max(0, Math.floor((wy - rad - g.y0) / g.ch)), cy1 = Math.min(g.cells - 1, Math.floor((wy + rad - g.y0) / g.ch));
     let best = -1, bd = Infinity;
@@ -501,6 +523,7 @@ export class Graph {
         for (let j = g.start[k]; j < g.start[k + 1]; j++) {
           const i = g.items[j];
           if (this.hi && !this.hi.has(i) && i !== this.me) continue;   // while highlighted, only lit nodes are pickable
+          if (!this.hi && this.lod[i] < lodT) continue;                // culled at this zoom
           const dd = Math.hypot(this.x[i] - wx, this.y[i] - wy) * v.s - this.r[i] * z - (this.isPerson[i] ? 3 : 0);
           if (dd < 8 && dd < bd) { bd = dd; best = i; }
         }
@@ -508,6 +531,8 @@ export class Graph {
     }
     return best;
   }
+  infoById(id) { const i = this.index?.get(id); return i === undefined ? null : this.nodeInfo(i); }
+  get meId() { return this.me >= 0 ? this.ids[this.me] : null; }
   nodeInfo(i) {
     return { id: this.ids[i], label: this.labels[i], group: this.groups[i], platform: this.plat[i], size: this.size[i], person: !!this.isPerson[i] };
   }

@@ -4,6 +4,12 @@ import { openDrawer } from './reader.js';
 
 const SHOW = 150;
 const dossiers = new Map();   // this tab's copy; the server keeps them in profile_cache.db
+export async function getDossier(pid) {
+  pid = +pid;
+  if (!dossiers.has(pid)) dossiers.set(pid, api(`/api/person/${pid}/dossier`).catch(e => { dossiers.delete(pid); throw e; }));
+  return dossiers.get(pid);
+}
+const cachedNow = new Set();   // ids whose dossier promise has resolved (render without a skeleton)
 
 export class People {
   constructor({ onAsk, onShowInGraph }) {
@@ -54,20 +60,17 @@ export class People {
     const meta = this.all.find(p => p.pid === pid);
     const el = $('person');
     el.scrollTop = 0;
-    if (dossiers.has(pid)) { this.dossier = dossiers.get(pid); this.renderDossier(this.dossier, meta); return; }
+    if (cachedNow.has(pid)) { this.dossier = await dossiers.get(pid); this.renderDossier(this.dossier, meta); return; }
     el.innerHTML = `<div class="p-head">
         <span class="avatar" style="background:${meta ? platformColor(meta.platform) : 'var(--muted)'}">${esc(initials(meta?.name))}</span>
         <div><h1>${esc(cleanName(meta?.name || 'Loading…'))}</h1><div class="sub">Reading your history together…</div></div>
       </div>
       <div class="tiles">${'<div class="tile"><div class="skeleton" style="height:26px;width:60%"></div><div class="skeleton" style="height:12px;width:80%;margin-top:8px"></div></div>'.repeat(4)}</div>
       <div class="skeleton" style="height:180px;border-radius:12px"></div>`;
-    let d = dossiers.get(pid);
-    if (!d) {
-      try { d = await api(`/api/person/${pid}/dossier`); } catch (e) {
-        if (this.current === pid) el.querySelector('.sub').textContent = `Couldn't load (${e.message}).`;
-        return;
-      }
-      dossiers.set(pid, d);
+    let d;
+    try { d = await getDossier(pid); cachedNow.add(pid); } catch (e) {
+      if (this.current === pid) el.querySelector('.sub').textContent = `Couldn't load (${e.message}).`;
+      return;
     }
     if (this.current !== pid) return;
     this.dossier = d;
@@ -120,7 +123,7 @@ export class People {
     const d = this.dossier;
     if (!d) return;
     if (e.target.closest('[data-ask]')) this.onAsk(`What do I usually talk about with ${cleanName(d.name)}, and what's the latest between us?`);
-    if (e.target.closest('[data-graph]')) this.onShowInGraph([d.node, ...d.top_chats.map(c => c.node)], d.node);
+    if (e.target.closest('[data-graph]')) this.onShowInGraph(d.person_id, d.name);
   }
 }
 

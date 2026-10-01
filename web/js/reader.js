@@ -17,7 +17,7 @@ export async function renderReader(el, sessionId, { onNodes, onBack, backLabel }
     el.innerHTML = `${onBack ? backBtn(backLabel) : ''}<p class="placeholder">Couldn't load this conversation (${esc(e.message)}).</p>`;
     bindBack(el, onBack); return;
   }
-  onNodes?.(s.nodes);
+  onNodes?.(s.nodes, s);
   const sum = s.summary || {};
   const meName = (s.people.find(p => /\(me\)$/.test(p.name)) || {}).name;
   const lines = parseTranscript(s.text);

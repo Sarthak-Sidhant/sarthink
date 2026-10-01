@@ -233,7 +233,36 @@ details.trace summary:hover, details.nums summary:hover { color: var(--text); }
 /* right side: graph over sources */
 .side { display: grid; grid-template-rows: minmax(260px, 1fr) minmax(220px, 42%); min-height: 0; min-width: 0; }
 .graph-pane { position: relative; min-height: 0; background: var(--graph-wash); border-bottom: 1px solid var(--border); overflow: hidden; }
-.graph-pane canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.overview, .focus3d { position: absolute; inset: 0; }
+.overview canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.focus3d { animation: fade .35s; }
+.focus3d > canvas { position: absolute; inset: 0; display: block; cursor: grab; touch-action: none; }
+.f3-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.f3-label {
+  position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 11.5px; font-weight: 500; color: var(--text);
+  padding: 2px 8px; border-radius: 20px; background: var(--glass-strong); border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(40, 60, 110, .1); transition: opacity .25s; will-change: transform;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.f3-label i { width: 6px; height: 6px; border-radius: 2px; transform: rotate(45deg); }
+.f3-label.k-me { font-weight: 600; background: var(--grad); color: #fff; border-color: transparent; }
+.f3-label.k-person { font-weight: 600; font-size: 12px; }
+.f3-label.k-theme { font-weight: 600; background: linear-gradient(135deg, rgba(154, 140, 240, .16), rgba(238, 127, 182, .16)), var(--glass-strong); }
+.f3-label.k-session { font-size: 10.5px; font-weight: 600; color: var(--accent-ink); background: var(--accent-soft); border-color: transparent; box-shadow: none; padding: 0 6px; min-width: 18px; justify-content: center; font-variant-numeric: tabular-nums; }
+.f3-label.k-session i { display: none; }
+.f3-label.k-chat { font-size: 10.5px; color: var(--text-2); }
+.f3-label.on { box-shadow: 0 0 0 2px var(--accent-2), 0 4px 14px rgba(224, 91, 156, .3); color: var(--text); }
+.f3-tip {
+  position: absolute; z-index: 3; pointer-events: none; max-width: 300px; padding: 9px 12px; border-radius: 10px;
+  background: var(--glass-strong); backdrop-filter: blur(12px); border: 1px solid var(--border); box-shadow: var(--shadow); font-size: 12px;
+}
+.f3-tip b { display: block; font-size: 12.5px; font-weight: 600; }
+.f3-tip span { color: var(--muted); }
+.f3-tip p { margin-top: 5px; color: var(--text-2); line-height: 1.45; }
+.f3-tip em { display: block; margin-top: 5px; font-style: normal; font-size: 11px; color: var(--accent-ink); }
+.focus-bar { position: absolute; top: 10px; left: 12px; z-index: 1; display: flex; gap: 8px; align-items: center; }
+.focus-what { font-size: 12px; color: var(--text-2); padding: 4px 10px; border-radius: 20px; background: var(--glass-strong); border: 1px solid var(--border); backdrop-filter: blur(10px); }
+.focus-what b { color: var(--text); font-weight: 600; }
 #graph-overlay { cursor: grab; touch-action: none; }
 #graph-overlay.dragging { cursor: grabbing; }
 #graph-overlay.hovering { cursor: pointer; }
