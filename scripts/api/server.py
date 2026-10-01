@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "index"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "api"))
-from common import DATA_DIR, EMBED_MODEL, GRAPH_DIR, USER_DB, connect_index  # noqa: E402
+from common import DATA_DIR, EMBED_MODEL, GRAPH_DIR, INDEX_DB, PROFILE_CACHE, SRC_DB, USER_DB, connect_index  # noqa: E402
 from search import Searcher  # noqa: E402
 from agent import Agent  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -281,8 +281,46 @@ def _agent():
     return AGENT
 
 
+DOSSIER_VERSION = "v1"
+_DOSSIER_LOCK = threading.Lock()
+
+
+def _dossier_db():
+    c = sqlite3.connect(PROFILE_CACHE)
+    c.execute("CREATE TABLE IF NOT EXISTS Dossiers (person_id INTEGER PRIMARY KEY, version TEXT, stamp TEXT, "
+              "data TEXT, built TEXT)")
+    return c
+
+
+def _data_stamp():
+    """Changes whenever the archive or the index is rebuilt, so cached dossiers go stale with them."""
+    return "|".join(str(int(p.stat().st_mtime)) if p.exists() else "-" for p in (SRC_DB, INDEX_DB))
+
+
 @app.get("/api/person/{person_id}/dossier")
-def dossier(person_id: int):
+def dossier(person_id: int, refresh: bool = False):
+    """A person's dossier, built once and kept in profile_cache.db (Dossiers) until the data changes.
+    ?refresh=true rebuilds it."""
+    stamp = _data_stamp()
+    with _DOSSIER_LOCK:
+        c = _dossier_db()
+        row = None if refresh else c.execute("SELECT data FROM Dossiers WHERE person_id=? AND version=? AND stamp=?",
+                                             (person_id, DOSSIER_VERSION, stamp)).fetchone()
+        c.close()
+    if row:
+        return {**json.loads(row[0]), "cached": True}
+    d = _build_dossier(person_id)
+    with _DOSSIER_LOCK:
+        c = _dossier_db()
+        c.execute("INSERT OR REPLACE INTO Dossiers VALUES (?,?,?,?,?)",
+                  (person_id, DOSSIER_VERSION, stamp, json.dumps(d, ensure_ascii=False),
+                   dt.datetime.now(IST).isoformat(timespec="minutes")))
+        c.commit()
+        c.close()
+    return {**d, "cached": False}
+
+
+def _build_dossier(person_id: int):
     """Everything about one person for the viewer: exact stats, monthly activity, themes with example
     conversations, and the busiest shared chats. Themes are LLM-grouped once and cached."""
     ag = _agent()

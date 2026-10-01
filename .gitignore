@@ -11,6 +11,7 @@ config/identity_map.json
 
 # Raw Data Traces & Databases
 *.js
+!web/js/*.js
 *.jsonl
 *.csv
 *.db
