@@ -430,6 +430,8 @@ def day_review(date: str):
     if not items:
         return {"date": date, "review": "No conversations with summaries on this day.", "sources": []}
     ag = _agent()
+    if not ag.client:
+        return {"date": date, "review": "Day reviews need a DeepSeek API key in `.env`.", "sources": items}
     blocks = "\n".join(f"[{i + 1}] {it['time'][11:]} · {it['header']}\n{it['summary']}" for i, it in enumerate(items))
     r = ag.client.chat.completions.create(
         model="deepseek-flash", max_tokens=2000, extra_body={"thinking": {"type": "disabled"}},

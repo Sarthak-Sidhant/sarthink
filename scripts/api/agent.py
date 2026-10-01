@@ -11,6 +11,7 @@ must cite [n]; the API returns only the cited sources, each with message ids and
 the viewer can highlight them.
 """
 import concurrent.futures as cf
+import os
 import datetime as dt
 import json
 import re
@@ -315,7 +316,7 @@ class PersonProfiles:
             JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model='deepseek-flash' AND x.prompt_version='v3'
             WHERE EXISTS (SELECT 1 FROM json_each(s.person_ids) j WHERE j.value = ?) ORDER BY s.start_ts""", (pid,))
         themes = []
-        if sessions:
+        if sessions and self.client:
             lines = []
             for sid, ts, data in sessions[-400:]:
                 topics = "; ".join((json.loads(data).get("topics") or [])[:6])
@@ -506,8 +507,9 @@ class Agent:
     person(name) -> list[dict]; payloads are the API's JSON shapes."""
 
     def __init__(self, backend, model="deepseek-v4-pro", thinking=True, verify=False, verify_model="deepseek-flash"):
-        env = dotenv_values(REPO_ROOT / ".env")
-        self.client = OpenAI(api_key=env["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com", timeout=300)
+        key = dotenv_values(REPO_ROOT / ".env").get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+        # without a key the agent answers with a hint; stats/search/inbox elsewhere keep working
+        self.client = OpenAI(api_key=key, base_url="https://api.deepseek.com", timeout=300) if key else None
         self.backend = backend
         self.model = model
         self.thinking = thinking
@@ -839,6 +841,13 @@ class Agent:
 
     def ask(self, question, history=None, multi=True, emit=None):
         t_start = time.time()
+        if not self.client:
+            return {"question": question, "mode": "disabled", "plan": {}, "draft": None, "verifier_changes": [],
+                    "answer": "The memory assistant needs a DeepSeek API key: add `DEEPSEEK_API_KEY=...` to `.env` "
+                              "and restart. Meanwhile you can explore the graph, click people for their dossier, "
+                              "and use the 📥 Inbox and 📅 On this day buttons.",
+                    "sources": [], "invalid_citations": [], "steps": [], "model": None, "thinking": None,
+                    "tokens": {"in": 0, "out": 0}, "seconds": 0}
         today = dt.datetime.now(IST).strftime("%d %b %Y")
         sources, trace, usage = {}, Trace(emit), {"in": 0, "out": 0}
         if multi and not history:

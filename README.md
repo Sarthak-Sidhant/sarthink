@@ -1,96 +1,148 @@
 # Sarthink
 
-**Sarthink** is an experimental system for visualizing and exploring your personal digital history as a unified social graph. It bridges the gap between fragmented social media archives (Twitter, Reddit, Discord, etc.) by reconstructing conversation threads and mapping your identity across platforms.
+**A private second brain built from your social-media history.** Sarthink turns years of exported chats
+(Twitter/X, Reddit, Discord, Instagram, Facebook) into one memory you can explore and talk to: a 3D graph of
+everyone you've talked to, and an assistant that answers questions about your own life with citations to the
+exact messages — and lights up those people and conversations in the graph.
 
-<video controls src="graph-thing.mp4" title="Title"></video>
-![Spherical Nodes](image.png)
+![The memory graph](image.png)
 
+---
 
-## Currently at Stage 2 (Memory Graph)
+## Try it in 2 minutes (fictional demo data)
 
-> [!WARNING]
-> **EXPERIMENTAL** This is an experimental project and may not be suitable for production use. I do not guarantee if it will work for you. There can be a lot of difference between our data exports and the way they are processed.
+The repo ships a **fictional** archive ("Aarav Mehta", ~2,500 messages across 4 platforms, 2024–2025) so you
+can run everything without anyone's real data.
 
-## Project Architecture
-
-The project is structured into three main layers, with all logic centralized in the `scripts/` directory:
-
-1.  **Ingestion & Context** (`scripts/context/`): Tools to bridge the "missing link" in data exports. While social media archives often only include your own messages, these scripts fetch the surrounding conversation context (replies, parent posts) to reconstruct meaningful threads.
-2.  **Parsing & ETL** (`scripts/parsers/`): A suite of Python scripts that normalize raw exports and fetched context into a structured SQLite database and JSONL logs.
-3.  **Semantic Intelligence** (`scripts/semantic/`): Advanced processing to chunk, summarize (via LLMs), and embed conversational data for semantic search and cognitive memory.
-4.  **Utilities & Analysis** (`scripts/utils/`, `scripts/analysis/`): Shared helper scripts for database management, layout computation, and specific data extraction tasks.
-5.  **Data Storage** (`processed_data/`): Structured into `db/` (SQLite), `logs/` (JSONL), `context/` (Fetched conversation context), `graph/` (CSV/LanceDB), `semantic/` (Processing outputs), and `metadata/` (Identity maps).
-6.  **Visualization** (`sarthink_graph.html`): A high-performance 3D memory graph rendered via Three.js.
-
-## Getting Started
-
-### 1. Prerequisites
-- Python 3.8+
-- Social media data exports (Twitter Takeout, Reddit Export, etc.)
-
-### 2. Environment Setup
-Clone the repository and install dependencies:
 ```bash
-pip install requests asyncpraw ijson pandas openai tiktoken lancedb sentence-transformers
+pip install -r requirements.txt
+cp .env.example .env          # optional: add DEEPSEEK_API_KEY to enable the assistant
+python3 run.py --demo         # then open http://127.0.0.1:8000
 ```
 
-Configure your credentials by copying the example environment file:
+- Python 3.10+. The first start downloads a small embedding model (~1.2 GB, Qwen3-Embedding-0.6B) and runs it
+  on CPU. Plug your laptop in — on battery, CPU search can take several seconds per query.
+- **Without** a DeepSeek key you still get the graph, semantic search, person dossiers (stats + themes),
+  the commitments inbox and "on this day". The key enables the chat assistant and day reviews (a typical
+  answer costs about half a US cent).
+
+### Things to try in the demo
+| Do this | What it shows |
+|---|---|
+| Ask *"Why did we miss the train to Goa?"* | cited answer from a group chat; the graph lights up the friends involved |
+| Ask *"What stipend did Nimbus Labs offer, and what did Dev think?"* | facts combined across Instagram and Discord |
+| Ask *"Who do I talk to the most?"* and open **📊 How these numbers were computed** | exact counts from SQL, with the query and a chart |
+| Click **Meera** in the graph | dossier: activity over time (watch the 2025 gap), themes, where you talk |
+| Click **📥 Inbox** | promises found in chats (e.g. "Scan and send offer letter to Ananya") → done / calendar (.ics) |
+| Click **📅 On this day**, pick 21 Dec, *Review this day* | journal-style recap of that day, cited |
+| Say *"please remember that Kabir is my school friend from Patna"*, then ask about Kabir | plain-language notes that come back only when relevant |
+| Ask *"When did I go skydiving?"* | it says it can't find it instead of inventing a memory |
+
+---
+
+## What it does
+
+- **Ask your memory** — an agent searches, reads whole conversations, runs read-only SQL for numbers, and
+  answers with numbered citations `[n]` that open the exact messages. A fact-check pass removes claims the
+  sources don't support. Live progress ("🔎 searching…", "📖 reading…") streams while it works.
+- **3D memory graph** — you at the centre, people placed by how much you talk, conversations between the
+  people in them, one region per platform. Answers fly the camera to what they cite.
+- **Person dossiers** — click anyone: message totals, who writes more, monthly activity, recurring themes
+  (with example conversations), and where you talk.
+- **Commitments inbox** — promises and plans found in your chats, both yours and others', with due dates
+  resolved from the conversation date; mark done or add to your calendar.
+- **On this day + day review** — your conversations on this date in earlier years, and a cited recap of any day.
+- **Notes** — tell it things in plain language ("remember that FireRoz uses she/her"); notes attach only when
+  that person or topic comes up, and are cited as `[note]`.
+- **Identity resolution** — your accounts across platforms are one "me"; other people can be merged with
+  `person_merges.json`; deleted/deactivated accounts become one person per chat with honest names.
+- **Privacy guards** — phone numbers, emails, addresses and order numbers are masked in answers; data and
+  notes stay in local files.
+
+## How it works
+
+```mermaid
+flowchart LR
+  A[Platform exports] --> B[Parsers<br/>scripts/parsers]
+  B --> C[(SQLite<br/>messages, people, threads)]
+  C --> D[Identity layer<br/>one person per human]
+  D --> E[Structure-aware chunks<br/>chat windows · reply trees]
+  E --> F[LLM summaries +<br/>context lines]
+  E --> G[Embeddings<br/>Qwen3-Embedding]
+  F --> H[(Keyword index<br/>SQLite FTS5)]
+  G --> I[Hybrid search<br/>dense + keyword, RRF]
+  H --> I
+  I --> J[Memory agent<br/>search · read · SQL · people · notes]
+  C --> J
+  J --> K[3D viewer + chat]
+```
+
+- **Deterministic core, LLM on top.** SQLite is the source of truth; counts and dates come from SQL, never
+  from a model. LLM output (summaries, themes, commitments, notes) is a separate, labelled layer.
+- **Chunking** is structure-aware: chats split into sessions on inactivity gaps and ~300-token windows; reply
+  trees keep their ancestor context; every chunk links to its exact message ids (for citations and graph
+  highlighting).
+- **Search** fuses Qwen3-Embedding vectors with keyword search (reciprocal-rank fusion). With your own data we
+  use the 8B model on a rented GPU via a stateless embedding service; the demo uses 0.6B on CPU.
+- **Agent**: DeepSeek (reasoning mode) with tools; answers are post-processed (citation mapping, redaction)
+  and optionally fact-checked against every source it read.
+
+## How well it works
+
+Measured on the author's real archive (302,794 messages, 2011–2026):
+
+| Eval | Result |
+|---|---|
+| Retrieval: 325 recall questions, right conversation in top 1 / top 10 | **88% / 98%** |
+| Agent: 92 questions (lookups, stats, timelines, Hinglish, multi-hop) — expected facts found | **90%** |
+| Questions about things that never happened — correctly says it can't find them | **10 / 10** |
+| Agent cited the exact conversation holding the answer (30 generated lookups) | **30 / 30** |
+| Claims not supported by their cited source (with fact-check pass) | **3%** |
+| Notes: saved, recalled when relevant, not leaked into unrelated answers | **10 / 10** |
+| Median answer time / typical cost per answer | ~25–30 s / ~$0.005 |
+
+Eval code: `scripts/index/needle_eval.py`, `scripts/api/agent_eval.py`, `scripts/api/notes_eval.py`.
+
+## Using your own data
+
+The full pipeline (each step is rerunnable; IDs are deterministic so rebuilds only redo what changed):
+
 ```bash
-cp .env.example .env
-```
-Fill in your API keys for Twitter (SocialData), Reddit (OAuth), and Cerebras (for summarization) in the `.env` file.
-
-### 3. Identity Mapping
-To group your nodes correctly across platforms, define your handles in `config/identity_map.json`. You can use the provided example as a template:
-```bash
-cp config/identity_map.json.example config/identity_map.json
-```
-
-### 4. Data Archive Placement
-Sarthink dynamically searches your repository for data, but relies on a standard `archive/` folder at the root of the project to locate your raw data exports safely:
-```text
-sarthink/
-├── archive/
-│   ├── reddit-export/          # Folder containing your Reddit posts.csv, comments.csv, etc.
-│   ├── discord-export/         # Folder containing your Discord JSON exports
-│   ├── any_meta_export.zip     # Raw Meta GDPR zips (Facebook/Instagram)
-│   └── tweets.js               # Twitter JS files (found recursively)
+# 1. parse exports into processed_data/db/sarthink_memory.db
+python3 scripts/parsers/{twitter,reddit,discord,meta}_parser.py      # see scripts/parsers for expected inputs
+python3 scripts/context/{twitter,reddit}_fetch_context.py            # optional: fetch missing parent posts
+# 2. build the memory index (processed_data/db/sarthink_index.db)
+python3 scripts/index/build_identity.py          # people; your handles come from config/identity_map.json
+python3 scripts/index/build_chunks.py && python3 scripts/index/check_chunks.py
+python3 scripts/index/summarize_sessions.py      # DeepSeek; ~$14 for 300k messages
+python3 scripts/index/build_fts.py
+python3 scripts/index/build_embeddings.py --model Qwen/Qwen3-Embedding-0.6B   # or 8B on a GPU (remote_embed.sh)
+python3 scripts/index/build_commitments.py
+python3 scripts/utils/export_cosmograph.py && python3 scripts/utils/compute_layout.py
+# 3. run
+python3 run.py --model 0.6b                      # or: python3 run.py --gpu <ssh_host> <ssh_port>  (8B encoder)
 ```
 
-## Workflow
+`scripts/demo/generate_demo.py` shows how the demo archive was generated and is a template for testing.
 
-### A. Context Fetching
-Fetch the conversation context that isn't included in your raw exports:
-- **Twitter**: Run `python3 scripts/context/twitter_fetch_context.py`
-- **Reddit**: Run `python3 scripts/context/reddit_fetch_context.py`
+## Project layout
 
-### B. Parsing Data
-Run the platform-specific parsers to populate the database:
-```bash
-python3 scripts/parsers/twitter_parser.py
-python3 scripts/parsers/reddit_parser.py
-python3 scripts/parsers/discord_parser.py
-python3 scripts/parsers/meta_parser.py
+```
+run.py                     one-command launcher
+sarthink_graph.html        3D viewer + chat, dossier, inbox (single file, Three.js)
+scripts/parsers/           platform export parsers -> SQLite
+scripts/context/           fetch missing reply context (Twitter, Reddit)
+scripts/index/             identity, chunking, summaries, keyword index, embeddings, commitments, evals
+scripts/api/               search API + memory agent (server.py, agent.py), evals, SSH tunnel
+scripts/utils/             graph export + 3D layout
+demo/                      fictional demo archive with its index, vectors and graph
+docs/ROADMAP.md            design decisions and progress
 ```
 
-### C. Semantic Pipeline (Optional)
-Chunk and summarize your data for search:
-```bash
-python3 scripts/semantic/chunk_builder.py
-python3 scripts/semantic/summarizer.py
-python3 scripts/semantic/embedder.py
-```
+## Limitations
 
-### D. Graph Generation
-Compute the 3D layout and export the data for the web UI:
-```bash
-python3 scripts/utils/compute_layout.py
-python3 scripts/utils/export_cosmograph.py
-```
-
-### E. Visualizing
-Run a local web server to view the graph:
-```bash
-python3 -m http.server 8000
-```
-Then visit `http://localhost:8000/sarthink_graph.html`.
+- Answers can still be wrong; every claim is cited so it can be checked.
+- Commitments and themes are extracted by an LLM and can be noisy.
+- Deleted accounts lose their names; a few real names are recovered only when a chat explicitly shows them.
+- With your own data, the LLM steps send message text to the model provider (DeepSeek); the graph, search,
+  stats and notes stay local.

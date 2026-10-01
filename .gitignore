@@ -42,3 +42,10 @@ context/reddit/Reddit_Context_Archive (Copy)
 context/reddit/Reddit_Context_Archive
 context/reddit/addn.py
 context/reddit/test.py
+# The fictional demo archive IS committed (judges run it); runtime files are not
+!demo/
+!demo/**
+demo/db/user_notes.db
+demo/db/twitter_users.db
+demo/db/*-wal
+demo/db/*-shm

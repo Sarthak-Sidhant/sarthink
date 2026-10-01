@@ -15,7 +15,7 @@ import re
 import sqlite3
 from collections import defaultdict
 
-from common import IDENTITY_MAP, TWITTER_ID_MAP, TWITTER_USERS_DB, connect_index
+from common import DATA_DIR, IDENTITY_MAP, TWITTER_ID_MAP, TWITTER_USERS_DB, connect_index
 
 SCHEMA = """
 DROP TABLE IF EXISTS Persons;
@@ -169,6 +169,29 @@ def build():
             by_norm[norm].append((u["id"], u["platform"]))
 
     conn.executemany("INSERT INTO PersonAliases VALUES (?,?,?,?,?)", alias_rows)
+
+    # Approved merges (DATA_DIR/person_merges.json): accounts the user confirmed are the same person across
+    # platforms, e.g. [{"name": "Kabir", "accounts": [["instagram", "kabir.singh"], ["discord", "kabirrr"]]}].
+    # Never automatic — MergeCandidates only suggests.
+    merges_file = DATA_DIR / "person_merges.json"
+    if merges_file.exists():
+        by_acct = {(u["platform"], str(u["raw_id"])): u["id"] for u in users}
+        pid_of = {r[0]: r[1] for r in alias_rows}
+        merged = 0
+        for grp in json.loads(merges_file.read_text()):
+            uids = [by_acct.get((p, str(r))) for p, r in grp.get("accounts", [])]
+            uids = [u for u in uids if u is not None and u not in me_ids]
+            if not uids:
+                continue
+            keep = pid_of[uids[0]]                # a single account just gets the given display name
+            for u in uids[1:]:
+                gone = pid_of[u]
+                conn.execute("UPDATE PersonAliases SET person_id = ?, method = 'merged' WHERE user_id = ?", (keep, u))
+                conn.execute("DELETE FROM Persons WHERE person_id = ?", (gone,))
+                merged += 1
+            if grp.get("name"):
+                conn.execute("UPDATE Persons SET name = ? WHERE person_id = ?", (grp["name"], keep))
+        print(f"Approved merges applied: {merged} accounts folded into existing people")
 
     # Placeholder accounts ("Instagram User", "Deleted User", deleted_user_*): one person per chat with an
     # honest, distinct name. The first chat keeps the account's person id; extra chats get new ids (appended,
