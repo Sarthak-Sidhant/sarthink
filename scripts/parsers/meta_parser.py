@@ -126,6 +126,7 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
     # Ego names for this platform (lowercased set for fast membership test)
     ego_names: set = ego_aliases.get(platform, set())
 
+    db.begin_source()   # repeats are matched against the DB per export (see stored_copy)
     with zipfile.ZipFile(zip_path, 'r') as z:
         file_list = z.namelist()
 
@@ -201,6 +202,13 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
                     if not content:
                         continue
 
+                    # Already stored from an earlier export? The positional id below differs between
+                    # exports, so match by content and keep the reply chain pointing at the stored row.
+                    stored = db.stored_copy(thread_db_id, utc_epoch, content)
+                    if stored:
+                        previous_msg_id = stored
+                        continue
+
                     sender_raw = decode_meta_string(msg.get('sender_name', ''))
                     is_ego     = sender_raw.lower() in ego_names or sender_raw == ego_name
 
@@ -225,7 +233,7 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
                     author_db_id = db.get_or_create_user(platform, author_id, author_display)
 
                     raw_id    = f"{convo_id}_{ts_ms}_{idx}"
-                    global_id = f"{platform}_{raw_id}"
+                    global_id = db.free_msg_id(f"{platform}_{raw_id}")
 
                     flat_entry = {
                         "log_id":        global_id,
@@ -287,8 +295,10 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
                         continue
 
                     thread_db_id = db.get_or_create_thread(platform, owner, f"Comment on {owner[:40]}")
+                    if db.stored_copy(thread_db_id, ts, content):
+                        continue
                     raw_id       = f"comment_{owner}_{ts}_{idx}"
-                    global_id    = f"{platform}_{raw_id}"
+                    global_id    = db.free_msg_id(f"{platform}_{raw_id}")
 
                     author_db_id = db.get_or_create_user(platform, ego_id, ego_name)
 
@@ -316,19 +326,21 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-def process_all_meta():
+def process_all_meta(fresh=False):
+    """Add every Instagram/Facebook zip in archive/ to the DB. Messages already stored (from this or an
+    older export) are skipped, so a newer export can sit next to the old one: nothing is deleted, and
+    messages that only the old export still has are kept."""
     # Load ego aliases from config before touching the DB
     ego_aliases, master_persona = load_meta_ego_aliases()
 
-    # Fresh reparse: clear old meta platform data
     db = SarthinkMemoryLayer()
-    for platform in ['instagram', 'facebook']:
-        jsonl_path = os.path.join(REPO_ROOT, 'processed_data', 'logs', 'meta_logs.jsonl')
+    if fresh:  # wipe and reparse (renumbers ids the index is keyed on; see purge_platform)
+        jsonl_path = os.path.join(db.jsonl_dir, 'meta_logs.jsonl')
         if os.path.exists(jsonl_path):
             os.remove(jsonl_path)
             logging.info("Cleared old meta_logs.jsonl for fresh reparse.")
-        db.purge_platform(platform)
-        break  # only delete JSONL once
+        for platform in ['instagram', 'facebook']:
+            db.purge_platform(platform)
 
     counters = {'msgs': 0}
 
@@ -349,7 +361,10 @@ def process_all_meta():
 
     db.commit()
     db.close()
-    logging.info(f"Meta parse complete. Ingested {counters['msgs']} messages.")
+    logging.info(f"Meta parse complete. {db.inserted} new messages added (already-stored ones skipped).")
 
 if __name__ == "__main__":
-    process_all_meta()
+    import argparse
+    ap = argparse.ArgumentParser(description="Add Instagram/Facebook exports from archive/ to the DB.")
+    ap.add_argument("--fresh", action="store_true", help="wipe instagram+facebook first (not needed to update)")
+    process_all_meta(fresh=ap.parse_args().fresh)

@@ -545,18 +545,19 @@ def process_dms(
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-def process_twitter():
-    # --- Fresh reparse: clear old twitter data so we start clean ---
-    # Delete the flat JSONL log — the DB gets the platform purge below.
-    jsonl_path = os.path.join(REPO_ROOT, 'processed_data', 'logs', JSONL_OUTPUT)
-    if os.path.exists(jsonl_path):
-        os.remove(jsonl_path)
-        logging.info(f"Cleared old {JSONL_OUTPUT} for fresh reparse.")
-
+def process_twitter(fresh=False):
+    """Add every Twitter archive found under the repo to the DB. Tweet and DM ids are stable, so messages
+    already stored are skipped and a newer archive can sit next to the old one: nothing is deleted, and
+    tweets that only the old archive still has (e.g. ones deleted since) are kept."""
     db           = SarthinkMemoryLayer()
-    # Purge all twitter rows from the DB so ghost nodes with wrong labels
-    # don't survive from a previous run.
-    db.purge_platform(PLATFORM)
+    if fresh:
+        # Wipe and reparse, e.g. after a parser fix that changes labels of existing rows. Renumbers the
+        # Users/Threads ids the index is keyed on (see purge_platform).
+        jsonl_path = os.path.join(db.jsonl_dir, JSONL_OUTPUT)
+        if os.path.exists(jsonl_path):
+            os.remove(jsonl_path)
+            logging.info(f"Cleared old {JSONL_OUTPUT} for fresh reparse.")
+        db.purge_platform(PLATFORM)
 
     internal_cache: set[str] = set()
     counters = {'msgs': 0}
@@ -584,8 +585,11 @@ def process_twitter():
     db.close()
     logging.info(
         f"Twitter parse complete. "
-        f"Ingested {counters['msgs']} messages total."
+        f"{db.inserted} new messages added (already-stored ones skipped)."
     )
 
 if __name__ == "__main__":
-    process_twitter()
+    import argparse
+    ap = argparse.ArgumentParser(description="Add Twitter archives found under the repo to the DB.")
+    ap.add_argument("--fresh", action="store_true", help="wipe twitter first (not needed to update)")
+    process_twitter(fresh=ap.parse_args().fresh)

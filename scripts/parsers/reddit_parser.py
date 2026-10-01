@@ -237,7 +237,8 @@ def process_reddit():
             continue
 
     db.close()
-    logging.info("Successfully processed all Reddit contexts and chats into memory using OOM-safe Streaming.")
+    logging.info(f"Successfully processed all Reddit contexts and chats: {db.inserted} new messages added "
+                 f"(already-stored ones skipped).")
 
 if __name__ == "__main__":
     process_reddit()

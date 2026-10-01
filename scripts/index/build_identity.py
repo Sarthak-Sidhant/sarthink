@@ -6,6 +6,9 @@
   (Twitter numeric IDs are resolved via twitter_users.db and twitter_id_map.json).
 - Cross-platform merges for other people are NOT automatic: same-name users on different
   platforms are written to MergeCandidates for review.
+- person_ids are stable across rebuilds and new imports: each account (and each chat of a placeholder
+  account) keeps the id it got first, recorded in the user DB (PersonIds), because notes, the profile cache
+  and the graph's P_ nodes refer to them. New people get new ids after the highest one.
 
 Usage: python3 scripts/index/build_identity.py
 """
@@ -15,7 +18,7 @@ import re
 import sqlite3
 from collections import defaultdict
 
-from common import DATA_DIR, IDENTITY_MAP, TWITTER_ID_MAP, TWITTER_USERS_DB, connect_index
+from common import DATA_DIR, IDENTITY_MAP, TWITTER_ID_MAP, TWITTER_USERS_DB, USER_DB, connect_index
 
 SCHEMA = """
 DROP TABLE IF EXISTS Persons;
@@ -118,6 +121,56 @@ def placeholder_name(u, t0, t1, title):
     return f"{label} ({_span(t0, t1)})"
 
 
+class PersonIds:
+    """Lasting (platform, raw_id, chat) -> person_id map, kept in the user DB next to the notes that use it.
+    chat is '' for an account, or the platform thread id for one chat of a split placeholder account."""
+
+    def __init__(self, conn):
+        self.db = sqlite3.connect(USER_DB)
+        self.db.execute("""CREATE TABLE IF NOT EXISTS PersonIds (
+            platform TEXT, raw_id TEXT, chat TEXT NOT NULL DEFAULT '', person_id INTEGER NOT NULL,
+            PRIMARY KEY (platform, raw_id, chat))""")
+        self.map = {(p, r, c): pid for p, r, c, pid in self.db.execute("SELECT * FROM PersonIds")}
+        if not self.map:
+            self._adopt(conn)
+        self.next = max(self.map.values(), default=1) + 1
+        self.new = []
+
+    def _adopt(self, conn):
+        """First run: take over the ids of the existing index, so notes written against it stay correct."""
+        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"PersonAliases", "PersonThreads"} <= have:
+            return
+        rows = conn.execute("""SELECT u.platform, u.raw_id, '', a.person_id FROM PersonAliases a
+            JOIN src.Users u ON u.id = a.user_id WHERE a.person_id != 1 AND a.method != 'merged'
+            UNION ALL
+            SELECT u.platform, u.raw_id, t.platform_thread_id, pt.person_id FROM PersonThreads pt
+            JOIN src.Users u ON u.id = pt.user_id JOIN src.Threads t ON t.id = pt.thread_id""").fetchall()
+        self.map = {(p, str(r), c): pid for p, r, c, pid in rows}
+        self.db.executemany("INSERT OR IGNORE INTO PersonIds VALUES (?,?,?,?)",
+                            [(p, r, c, pid) for (p, r, c), pid in self.map.items()])
+        self.db.commit()
+        print(f"PersonIds: adopted {len(self.map)} ids from the existing index")
+
+    def get(self, platform, raw_id, chat=""):
+        return self.map.get((platform, str(raw_id), chat))
+
+    def assign(self, platform, raw_id, chat="", pid=None):
+        key = (platform, str(raw_id), chat)
+        if key not in self.map:
+            if pid is None:
+                pid, self.next = self.next, self.next + 1
+            self.map[key] = pid
+            self.new.append((*key, pid))
+        return self.map[key]
+
+    def save(self):
+        self.db.executemany("INSERT INTO PersonIds VALUES (?,?,?,?)", self.new)
+        self.db.commit()
+        if self.new:
+            print(f"PersonIds: {len(self.new)} new ids recorded")
+
+
 def build():
     with open(IDENTITY_MAP) as f:
         idmap = json.load(f)
@@ -126,6 +179,7 @@ def build():
     tw_names = load_twitter_names()
 
     conn = connect_index()
+    pids = PersonIds(conn)          # before SCHEMA drops the old tables it may adopt ids from
     conn.executescript(SCHEMA)
     conn.execute("INSERT INTO Persons(person_id, name, is_me) VALUES (1, ?, 1)", (me_name,))
 
@@ -152,7 +206,7 @@ def build():
         else:
             ambiguous.append((platform, dn, [i for i in ids if i not in strong]))
 
-    me_matches, alias_rows, next_pid = [], [], 2
+    me_matches, alias_rows = [], []
     by_norm = defaultdict(list)
 
     for u in users:
@@ -161,9 +215,9 @@ def build():
             alias_rows.append((u["id"], 1, u["platform"], name, "identity_map"))
             me_matches.append((u["id"], u["platform"], u["raw_id"], u["display_name"]))
             continue
-        conn.execute("INSERT INTO Persons(person_id, name) VALUES (?, ?)", (next_pid, name))
-        alias_rows.append((u["id"], next_pid, u["platform"], name, "singleton"))
-        next_pid += 1
+        pid = pids.assign(u["platform"], u["raw_id"])
+        conn.execute("INSERT INTO Persons(person_id, name) VALUES (?, ?)", (pid, name))
+        alias_rows.append((u["id"], pid, u["platform"], name, "singleton"))
         norm = re.sub(r"[^a-z0-9]", "", name.lower().lstrip("@").removeprefix("u/"))
         if len(norm) >= 4:
             by_norm[norm].append((u["id"], u["platform"]))
@@ -194,26 +248,29 @@ def build():
         print(f"Approved merges applied: {merged} accounts folded into existing people")
 
     # Placeholder accounts ("Instagram User", "Deleted User", deleted_user_*): one person per chat with an
-    # honest, distinct name. The first chat keeps the account's person id; extra chats get new ids (appended,
-    # so every other person's id is unchanged).
+    # honest, distinct name. The account's first chat keeps the account's person id; other chats get their
+    # own ids, remembered per chat in PersonIds so a newly imported chat never renumbers the others.
     pid_of = {r[0]: r[1] for r in alias_rows}
     guesses = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, name FROM PersonNameGuesses")}
     split = 0
     for u in users:
         if u["id"] in me_ids or not is_placeholder(u):
             continue
-        chats = conn.execute("""SELECT m.thread_id, MIN(m.timestamp_utc), MAX(m.timestamp_utc), t.title
-            FROM src.Messages m JOIN src.Threads t ON t.id = m.thread_id WHERE m.author_id = ?
+        chats = conn.execute("""SELECT m.thread_id, MIN(m.timestamp_utc), MAX(m.timestamp_utc), t.title,
+            t.platform_thread_id FROM src.Messages m JOIN src.Threads t ON t.id = m.thread_id WHERE m.author_id = ?
             GROUP BY m.thread_id ORDER BY MIN(m.timestamp_utc)""", (u["id"],)).fetchall()
-        for i, (tid, t0, t1, title) in enumerate(chats):
+        account_pid = pid_of[u["id"]]
+        account_pid_taken = any(pids.get(u["platform"], u["raw_id"], c[4]) == account_pid for c in chats)
+        for tid, t0, t1, title, chat in chats:
             name = guesses.get((u["id"], tid)) or placeholder_name(u, t0, t1, title)
-            if i == 0:
-                pid = pid_of[u["id"]]
+            pid = pids.get(u["platform"], u["raw_id"], chat)
+            if pid is None:
+                pid = pids.assign(u["platform"], u["raw_id"], chat, None if account_pid_taken else account_pid)
+                account_pid_taken = True
+            if pid == account_pid:
                 conn.execute("UPDATE Persons SET name = ?, placeholder = 1 WHERE person_id = ?", (name, pid))
                 conn.execute("UPDATE PersonAliases SET name = ? WHERE user_id = ?", (name, u["id"]))
             else:
-                pid = next_pid
-                next_pid += 1
                 conn.execute("INSERT INTO Persons(person_id, name, placeholder) VALUES (?,?,1)", (pid, name))
                 split += 1
             conn.execute("INSERT INTO PersonThreads VALUES (?,?,?)", (u["id"], tid, pid))
@@ -238,8 +295,10 @@ def build():
     ]
     conn.executemany("INSERT INTO MergeCandidates VALUES (?,?,?)", cands)
     conn.commit()
+    pids.save()
 
-    print(f"Persons: {next_pid - 1}  (users: {len(users)})")
+    n_persons = conn.execute("SELECT COUNT(*) FROM Persons").fetchone()[0]
+    print(f"Persons: {n_persons}  (users: {len(users)})")
     print(f"Owner '{me_name}' matched {len(me_matches)} user rows — verify these are all you:")
     for m in me_matches:
         print(f"   user_id={m[0]:<6} {m[1]:<10} raw_id={m[2]!s:<22} display={m[3]!s}")

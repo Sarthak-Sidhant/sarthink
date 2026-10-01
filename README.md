@@ -123,6 +123,17 @@ python3 scripts/utils/export_cosmograph.py && python3 scripts/utils/compute_layo
 python3 run.py --model 0.6b                      # or: python3 run.py --gpu <ssh_host> <ssh_port>  (8B encoder)
 ```
 
+### Adding a newer export
+
+Put the new export next to the old one in `archive/` (keep the old one) and rerun the same steps. Parsers only
+add: messages already stored are skipped (Instagram/Facebook ones are matched by chat, time and text, since
+their ids change between exports), and messages that only the old export still has are kept. People keep
+their `person_id` across rebuilds (recorded in `user_notes.db`, table `PersonIds`), so notes, merges and
+the graph stay attached to the right person. Unchanged conversations keep their session and chunk ids, so
+`summarize_sessions.py` only pays for new ones, and until the new chunks are embedded search finds them by
+keyword. Don't delete `sarthink_index.db` to update: it holds the paid-for summaries.
+`--fresh` on the Twitter/Meta parsers wipes that platform and reparses it; it is not needed for updates.
+
 `scripts/demo/generate_demo.py` shows how the demo archive was generated and is a template for testing.
 
 ## Project layout
