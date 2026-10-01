@@ -53,8 +53,11 @@ R@1 0.88, R@10 0.98. Vectors in processed_data/index/emb_qwen3-embedding-8b_ctx.
 9. Demo moments + second brain + judge readiness (DONE 2026-10-01):
    - Viewer: chat with live progress (SSE), citations -> graph highlight + camera, numbers panel (SQL + chart),
      person dossier on click, commitments inbox (+ .ics), on this day, cited day review, plain-language notes.
-   - Placeholder accounts split per chat with honest names; evidence-verified name guesses; approved merges
-     via person_merges.json.
+   - Placeholder accounts split per chat with honest names; evidence-verified name guesses.
+   - Contacts: accounts confirmed as one human (from dossier suggestions or search, incl. a deleted account's
+     chat) share one person_id; stored in user_notes.db (Contacts/ContactAccounts/ContactRejections), applied by
+     build_identity.py and live by the server (people, chunk/session person lists, graph with the same layout).
+     person_merges.json is imported once. Chunk text keeps account names until build_chunks.py reruns.
    - Agent eval: 92 questions, 90% facts found, 10/10 abstentions, 3% unsupported claims, notes 10/10.
    - run.py --demo + fictional demo archive (demo/), CPU-only 0.6B search, works without an LLM key.
 Remaining: browser QA of the viewer panels, demo script + slides, optional re-run of the eval after the

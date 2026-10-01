@@ -10,10 +10,13 @@ Thread groups come from title/id patterns per platform (DMs vs public/comment th
 Requires scripts/index/build_identity.py to have been run.
 
 Usage: python3 scripts/utils/export_cosmograph.py   (then compute_layout.py)
+export(keep_layout=True) re-exports after people were linked/unlinked without a new layout: nodes keep their
+positions, and a person new to the graph is placed next to its chats.
 """
 import csv
 import logging
 import os
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -66,8 +69,8 @@ def clean(s, n=None):
     return (s[:n] + "...") if n and len(s) > n else s
 
 
-def export():
-    conn = connect_index()
+def export(conn=None, keep_layout=False):
+    conn = conn or connect_index()
     person_of = {r["user_id"]: r["person_id"] for r in conn.execute("SELECT user_id, person_id FROM PersonAliases")}
     per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
     persons = {r["person_id"]: dict(r) for r in conn.execute("SELECT person_id, name, is_me FROM Persons")}
@@ -112,10 +115,14 @@ def export():
 
     edges = [(f"P_{pid}", f"T_{tid}", n) for (pid, tid), n in weights.items()]
 
+    header = ["id", "label", "group", "size", "color"]
+    if keep_layout:
+        nodes = with_old_layout(nodes, edges)
+        header += ["layout_x", "layout_y", "layout_z"]
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUT_DIR / "cosmograph_nodes.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, quoting=csv.QUOTE_ALL)
-        w.writerow(["id", "label", "group", "size", "color"])
+        w.writerow(header)
         w.writerows(nodes)
     with open(OUT_DIR / "cosmograph_edges.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, quoting=csv.QUOTE_ALL)
@@ -128,6 +135,24 @@ def export():
     logging.info(f"Wrote {len(nodes)} nodes, {len(edges)} edges")
     for g, c in sorted(counts.items(), key=lambda x: -x[1]):
         logging.info(f"  {g:<26} {c}")
+
+
+def with_old_layout(nodes, edges):
+    with open(OUT_DIR / "cosmograph_nodes.csv", encoding="utf-8") as f:
+        pos = {r["id"]: (r["layout_x"], r["layout_y"], r["layout_z"]) for r in csv.DictReader(f)}
+    near = defaultdict(list)
+    for p, t, _ in edges:
+        if t in pos:
+            near[p].append([float(v) for v in pos[t]])
+    rnd = random.Random(42)
+    out = []
+    for n in nodes:
+        xyz = pos.get(n[0])
+        if xyz is None:
+            pts = near.get(n[0]) or [[0.0, 0.0, 0.0]]
+            xyz = tuple(f"{sum(p[i] for p in pts) / len(pts) + rnd.uniform(-60, 60):.4f}" for i in range(3))
+        out.append((*n, *xyz))
+    return out
 
 
 if __name__ == "__main__":

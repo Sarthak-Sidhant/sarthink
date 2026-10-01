@@ -9,6 +9,8 @@ else — vectors, keyword index, chats — stays on this machine.
   GET /api/session/{session_id}  full conversation span + LLM summary + neighbours
   GET /api/chunk/{chunk_id}
   GET /api/person?name=...       name -> person candidates
+  GET /api/person/{id}/accounts  accounts behind a person + same-person suggestions; POST .../link, .../unlink,
+                                 .../name, .../reject edit contacts and relink the index live
 
 Every hit carries message ids (for citations) and graph node ids (P_<person>, T_<thread>) to highlight.
 
@@ -32,9 +34,13 @@ from fastapi.staticfiles import StaticFiles
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "index"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "api"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "utils"))
 from common import DATA_DIR, EMBED_MODEL, GRAPH_DIR, INDEX_DB, PROFILE_CACHE, SRC_DB, USER_DB, connect_index  # noqa: E402
 from search import Searcher  # noqa: E402
 from agent import Agent  # noqa: E402
+import build_identity  # noqa: E402
+import export_cosmograph  # noqa: E402
+from contacts import ContactStore, accounts_of, refresh_person_lists  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 SUMMARY_MODEL, SUMMARY_VERSION = "deepseek-flash", "v3"
@@ -356,6 +362,181 @@ def _build_dossier(person_id: int):
             "themes": themes}
 
 
+# ─── Contacts: the humans behind accounts ───────────────────────────────────────────────────────────────
+CONTACTS: ContactStore = None
+
+
+def _person_row(pid):
+    r = S.conn.execute("SELECT person_id, name, is_me, placeholder, platform, message_count FROM Persons "
+                       "WHERE person_id = ?", (pid,)).fetchone()
+    if not r:
+        raise HTTPException(404, f"person {pid} not found (relinked?)")
+    return r
+
+
+def _suggestions(pid, accts, placeholder):
+    """Other people who may be the same human: same normalised name on another platform (MergeCandidates),
+    and for a deleted account, people matching its guessed name. Turned-down pairs are not offered again."""
+    uids = [r[0] for r in S.conn.execute("SELECT user_id FROM PersonAliases WHERE person_id = ?", (pid,))]
+    others = {}
+    for (user_ids,) in S.conn.execute("SELECT user_ids FROM MergeCandidates"):
+        ids = json.loads(user_ids)
+        if set(ids) & set(uids):
+            for (o,) in S.conn.execute(f"SELECT DISTINCT person_id FROM PersonAliases WHERE user_id IN "
+                                       f"({','.join('?' * len(ids))})", ids):
+                others.setdefault(o, "same name on another platform")
+    name = NAMES.get(pid, "")
+    if placeholder and name.endswith("?"):
+        for c in person_candidates(name.rstrip("?").strip(), limit=5):
+            others.setdefault(c["person_id"], f"its name was guessed as {name}")
+    out = []
+    for o, why in others.items():
+        if o in (pid, 1):
+            continue
+        r = S.conn.execute("SELECT name, platform, message_count, placeholder FROM Persons WHERE person_id = ?",
+                           (o,)).fetchone()
+        if not r or (placeholder and r["placeholder"]):
+            continue
+        if CONTACTS.rejected([a["key"] for a in accts], [a["key"] for a in accounts_of(S.conn, o)]):
+            continue
+        out.append({"person_id": o, "node": f"P_{o}", "name": r["name"], "platform": r["platform"],
+                    "messages": r["message_count"], "why": why})
+    return out
+
+
+@app.get("/api/person/{pid}/accounts")
+@locked
+def person_accounts(pid: int):
+    p = _person_row(pid)
+    accts = accounts_of(S.conn, pid)
+    # the primary account is the one whose own id the contact carries; it can't be unlinked
+    own = {(r[0], r[1], r[2]): r[3] for r in sqlite3.connect(USER_DB).execute(
+        "SELECT platform, raw_id, chat, person_id FROM PersonIds")} if _has_table("PersonIds") else {}
+    is_primary = lambda a: len(accts) == 1 or (own[a["key"]] == pid if a["key"] in own  # noqa: E731
+                                               else not a["key"][2] and a["method"] not in ("merged", "contact"))
+    return {"person_id": pid, "name": p["name"], "is_me": bool(p["is_me"]), "placeholder": bool(p["placeholder"]),
+            "contact_name": CONTACTS.names().get(pid),
+            "accounts": [{"key": list(a["key"]), "platform": a["platform"], "name": a["name"],
+                          "chat_title": a["chat_title"], "messages": a["messages"],
+                          "primary": is_primary(a)} for a in accts],
+            "suggestions": [] if p["is_me"] else _suggestions(pid, accts, p["placeholder"])}
+
+
+def _has_table(name):
+    return bool(sqlite3.connect(USER_DB).execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+
+
+def _relink():
+    """Apply the contacts to the live index: people tables, person lists of chunks/sessions, the graph (same
+    layout), and the server's caches. Notes about a person who was folded into a contact move with them."""
+    global NAMES
+    before = {r[0]: r[1] for r in S.conn.execute("SELECT user_id, person_id FROM PersonAliases")}
+    before_pt = {(r[0], r[1]): r[2] for r in S.conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
+    people_before = {r[0]: (r[1], r[2]) for r in S.conn.execute("SELECT person_id, name, message_count FROM Persons")}
+    build_identity.build(S.conn, verbose=False)
+    after = {r[0]: r[1] for r in S.conn.execute("SELECT user_id, person_id FROM PersonAliases")}
+    after_pt = {(r[0], r[1]): r[2] for r in S.conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
+    alive = {r[0] for r in S.conn.execute("SELECT person_id FROM Persons")}
+    moved = {}
+    for old, new in [*((before[u], after.get(u)) for u in before), *((before_pt[k], after_pt.get(k)) for k in before_pt)]:
+        if old not in alive and new is not None:
+            moved.setdefault(old, set()).add(new)
+    if _has_table("Notes"):
+        notes = sqlite3.connect(USER_DB)
+        for old, new in moved.items():
+            if len(new) == 1:
+                notes.execute("UPDATE Notes SET person_id = ? WHERE person_id = ?", (new.pop(), old))
+        notes.commit()
+    people_after = {r[0]: (r[1], r[2]) for r in S.conn.execute("SELECT person_id, name, message_count FROM Persons")}
+    stale = [p for p in people_before.keys() | people_after.keys() if people_before.get(p) != people_after.get(p)]
+    with _DOSSIER_LOCK:                   # cached dossiers of everyone whose accounts changed
+        c = _dossier_db()
+        c.executemany("DELETE FROM Dossiers WHERE person_id = ?", [(p,) for p in stale])
+        c.commit()
+        c.close()
+    n = refresh_person_lists(S.conn)
+    export_cosmograph.export(S.conn, keep_layout=True)
+    NAMES = {r["person_id"]: r["name"] for r in S.conn.execute("SELECT person_id, name FROM Persons")}
+    for r in S.conn.execute("SELECT chunk_id, person_ids FROM Chunks"):
+        i = S.row.get(r["chunk_id"])
+        if i is not None:
+            S.persons[i] = tuple(json.loads(r["person_ids"]))
+    return n
+
+
+class LinkRequest(BaseModel):
+    other: int
+
+
+class KeyRequest(BaseModel):
+    key: list[str]
+
+
+class NameRequest(BaseModel):
+    name: str
+
+
+def _check_linkable(pid):
+    if _person_row(pid)["is_me"]:
+        raise HTTPException(400, "your own accounts come from identity_map.json, not contacts")
+
+
+@app.post("/api/person/{pid}/link")
+@locked
+def link_person(pid: int, body: LinkRequest):
+    """`other` is the same human as `pid`: both become one contact under the older (smaller) person id."""
+    if pid == body.other:
+        raise HTTPException(400, "that is the same person")
+    _check_linkable(pid)
+    _check_linkable(body.other)
+    keep, gone = sorted((pid, body.other))
+    pk, pg = _person_row(keep), _person_row(gone)
+    name = None    # a deleted account takes the name of the real person it is linked to
+    if pk["placeholder"] and not pg["placeholder"]:
+        name = pg["name"]
+    CONTACTS.link(keep, gone, [a["key"] for a in accounts_of(S.conn, keep)],
+                  [a["key"] for a in accounts_of(S.conn, gone)], name=name)
+    _relink()
+    return {"person_id": keep, "node": f"P_{keep}", "name": NAMES.get(keep)}
+
+
+@app.post("/api/person/{pid}/unlink")
+@locked
+def unlink_person(pid: int, body: KeyRequest):
+    key = tuple(body.key)
+    acct = next((a for a in person_accounts.__wrapped__(pid)["accounts"] if tuple(a["key"]) == key), None)
+    if not acct:
+        raise HTTPException(404, "that account is not part of this person")
+    if acct["primary"]:
+        raise HTTPException(400, "this is the contact's main account; unlink the others instead")
+    CONTACTS.unlink(key)
+    _relink()
+    split = next((a for a in S.conn.execute("SELECT person_id FROM PersonThreads pt JOIN src.Threads t ON "
+                  "t.id = pt.thread_id JOIN src.Users u ON u.id = pt.user_id WHERE u.platform=? AND u.raw_id=? "
+                  "AND t.platform_thread_id=?", key)), None) if key[2] else S.conn.execute(
+        "SELECT a.person_id FROM PersonAliases a JOIN src.Users u ON u.id = a.user_id WHERE u.platform=? "
+        "AND u.raw_id=?", key[:2]).fetchone()
+    return {"person_id": pid, "unlinked_person_id": split[0] if split else None}
+
+
+@app.post("/api/person/{pid}/name")
+@locked
+def name_person(pid: int, body: NameRequest):
+    _check_linkable(pid)
+    CONTACTS.rename(pid, body.name, [a["key"] for a in accounts_of(S.conn, pid)])
+    _relink()
+    return {"person_id": pid, "name": NAMES.get(pid)}
+
+
+@app.post("/api/person/{pid}/reject")
+@locked
+def reject_person(pid: int, body: LinkRequest):
+    """Not the same human: stop suggesting this pair."""
+    CONTACTS.reject([a["key"] for a in accounts_of(S.conn, pid)], [a["key"] for a in accounts_of(S.conn, body.other)])
+    return {"ok": True}
+
+
 # ─── Second-brain features: commitments inbox, on this day, day review ─────────────────────────────────
 def _status_db():
     c = sqlite3.connect(USER_DB)
@@ -519,6 +700,15 @@ def viewer():
     return FileResponse(REPO_ROOT / "sarthink_graph.html")
 
 
+@app.middleware("http")
+async def revalidate_graph(request, call_next):
+    """Graph files change when people are linked; make browsers revalidate them (cheap 304 via ETag)."""
+    resp = await call_next(request)
+    if request.url.path.startswith("/processed_data/graph"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 app.mount("/processed_data/graph", StaticFiles(directory=GRAPH_DIR), name="graph")   # URL kept for the viewer
 
 
@@ -530,5 +720,10 @@ if __name__ == "__main__":
     S = Searcher(a.model, "ctx", encoder_url=os.environ.get("EMBED_URL"))
     S.conn = connect_index(check_same_thread=False)
     NAMES = {r["person_id"]: r["name"] for r in S.conn.execute("SELECT person_id, name FROM Persons")}
+    CONTACTS = ContactStore()
+    # a hand-written person_merges.json already applied to a prebuilt index (e.g. the demo) becomes contacts
+    CONTACTS.import_merges(DATA_DIR / "person_merges.json", lambda p, r: (S.conn.execute(
+        "SELECT a.person_id FROM PersonAliases a JOIN src.Users u ON u.id = a.user_id WHERE u.platform=? AND u.raw_id=?",
+        (p, r)).fetchone() or [None])[0])
     print(f"Data: {DATA_DIR} | {len(S.ids)} chunks | encoder: {S.encoder_url or 'local ' + a.model + ' model'}")
     uvicorn.run(app, host="127.0.0.1", port=a.port)

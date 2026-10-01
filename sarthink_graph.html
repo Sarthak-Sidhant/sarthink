@@ -740,6 +740,14 @@
     .ds-ex:hover { color: #fff; border-color: rgba(79,142,255,.6); }
     .ds-chat { font-size: .76rem; color: var(--mid); padding: 4px 0; cursor: pointer; }
     .ds-chat:hover { color: #fff; }
+    .ds-acct { display: flex; gap: 8px; align-items: center; font-size: .76rem; color: var(--mid); padding: 4px 0; }
+    .ds-acct .w { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ds-acct .w b { color: #fff; font-weight: 500; } .ds-acct .w i { color: var(--dim); font-style: normal; }
+    .ds-acct .btn { font-size: .66rem; padding: 2px 7px; }
+    .ds-acct.sug { background: rgba(255,213,74,.06); border-radius: 8px; padding: 6px 8px; }
+    .ds-link { color: var(--acc); cursor: pointer; font: 500 .66rem 'Outfit', sans-serif; letter-spacing: 0; margin-left: 6px; }
+    #ds-find { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 6px 9px; border-radius: 8px; font: .76rem 'Outfit', sans-serif;
+      background: rgba(255,255,255,.04); border: 1px solid var(--bdr); color: #fff; outline: none; }
     .legend { font-size: .64rem; color: var(--dim); }
     .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin: 0 3px 0 8px; vertical-align: 0; }
 
@@ -2217,6 +2225,7 @@
             <div class="ds-stat"><div class="v">${pct}%</div><div class="l">written by you</div></div>
             <div class="ds-stat"><div class="v">${d.months.length}</div><div class="l">active months</div></div>
           </div>
+          <div id="ds-accts"></div>
           <div><div class="ds-h">ACTIVITY OVER TIME <span class="legend"><i style="background:rgba(79,142,255,.6)"></i>them<i style="background:#FFD54A"></i>you</span></div>
             <div class="ds-bars">${bars}</div>
             <div class="ds-axis"><span>${d.months[0]?.month || ''}</span><span>${d.months.at(-1)?.month || ''}</span></div></div>
@@ -2229,7 +2238,60 @@
           if (e.target.id === 'ds-ask') { $('chat').classList.remove('collapsed'); sendChat(`Tell me about my friendship with ${d.name}`); }
         };
         highlightNodes([d.node, ...d.top_chats.map(c => c.node)]);
+        renderAccounts(pid);
       } catch (e) { $('ds-body').innerHTML = `<span style="color:#ff8080">Could not load: ${esc(e.message)}</span>`; }
+    }
+
+    // Accounts behind a person: link the same human across platforms (incl. deleted accounts), unlink, rename.
+    // Every change relinks the index on the server; the page then reloads to redraw the graph.
+    const acctLabel = a => a.chat_title !== null && a.key[2]
+      ? `<b>${esc(a.platform)}</b> deleted account <i>in “${esc(a.chat_title)}”</i>`
+      : `<b>${esc(a.platform)}</b> ${esc(a.name)}`;
+    async function renderAccounts(pid) {
+      const box = $('ds-accts'); if (!box) return;
+      const d = await (await fetch(`/api/person/${pid}/accounts`)).json();
+      if (d.is_me) return;
+      const rows = d.accounts.map((a, i) => `<div class="ds-acct"><span class="w">${acctLabel(a)} <i>· ${a.messages} msgs</i></span>
+        ${a.primary ? '' : `<button class="btn" data-unlink="${i}" title="Not the same person: split this account off">Unlink</button>`}</div>`).join('');
+      const sugs = d.suggestions.map(s => `<div class="ds-acct sug"><span class="w"><b>${esc(s.name)}</b> <i>· ${esc(s.platform)} · ${s.messages} msgs · ${esc(s.why)}</i></span>
+        <button class="btn" data-link="${s.person_id}">Same person</button><button class="btn" data-reject="${s.person_id}">Not them</button></div>`).join('');
+      box.innerHTML = `<div class="ds-h">ACCOUNTS<span class="ds-link" id="ds-rename">rename</span></div>${rows}
+        ${sugs ? `<div class="ds-h" style="margin-top:8px">SAME PERSON?</div>${sugs}` : ''}
+        <input id="ds-find" placeholder="Link another account of ${esc(d.name)}… (type a name)"><div id="ds-found"></div>`;
+      const act = async (url, body, msg) => {
+        box.innerHTML = `<div class="msg hint">${msg}…</div>`;
+        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+        const j = await r.json();
+        if (!r.ok) { box.innerHTML = `<span style="color:#ff8080">${esc(j.detail || 'failed')}</span>`; return; }
+        location.hash = 'person=' + (j.person_id ?? pid); location.reload();
+      };
+      let t;
+      $('ds-find').oninput = e => {
+        clearTimeout(t);
+        const q = e.target.value.trim();
+        t = setTimeout(async () => {
+          if (q.length < 2) { $('ds-found').innerHTML = ''; return; }
+          const c = (await (await fetch(`/api/person?name=${encodeURIComponent(q)}`)).json()).candidates
+            .filter(c => !c.is_me && c.person_id !== +pid);
+          $('ds-found').innerHTML = c.map(c => `<div class="ds-acct"><span class="w"><b>${esc(c.name)}</b> <i>· ${esc(c.platform || '')} · ${c.messages} msgs</i></span>
+            <button class="btn" data-link="${c.person_id}">Link</button></div>`).join('') || '<div class="legend">No one by that name</div>';
+        }, 250);
+      };
+      box.onclick = e => {
+        e.stopPropagation();
+        const b = e.target.dataset;
+        if (e.target.id === 'ds-rename') {
+          const n = prompt(`Name for this person (shown everywhere instead of account names):`, d.contact_name || d.name);
+          if (n !== null) act(`/api/person/${pid}/name`, { name: n }, 'Renaming');
+        } else if (b.link) {
+          act(`/api/person/${pid}/link`, { other: +b.link }, 'Linking');
+        } else if (b.unlink) {
+          act(`/api/person/${pid}/unlink`, { key: d.accounts[+b.unlink].key }, 'Unlinking');
+        } else if (b.reject) {
+          fetch(`/api/person/${pid}/reject`, { method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ other: +b.reject }) }).then(() => renderAccounts(pid));
+        }
+      };
     }
     function closeDossier() { $('dossier').classList.remove('show'); }
 
@@ -2300,6 +2362,8 @@
       setTimeout(() => { $('loading').style.display = 'none'; }, 800);
 
       renderLoop();
+      const m = location.hash.match(/person=(\d+)/);       // reopened after linking/unlinking accounts
+      if (m) { history.replaceState(null, '', location.pathname); openDossier(m[1]); }
     }
 
     boot().catch(err => {

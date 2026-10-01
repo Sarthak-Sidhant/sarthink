@@ -25,6 +25,13 @@ export class People {
     });
     $('ppl-items').addEventListener('click', e => { const r = e.target.closest('.ppl'); if (r) location.hash = `#people/${r.dataset.pid}`; });
     $('person').addEventListener('click', e => this.onPersonClick(e));
+    let ft;
+    $('person').addEventListener('input', e => {
+      if (e.target.id === 'acct-q') { clearTimeout(ft); ft = setTimeout(() => this.findAccounts(e.target.value.trim()), 250); }
+    });
+    $('person').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.target.closest('#acct-rename')) $('acct-rename').querySelector('[data-save-name]').click();
+    });
   }
 
   setPeople(list) {
@@ -98,6 +105,7 @@ export class People {
         <div class="tile"><div class="v">${num(d.months.length)}</div><div class="l">active months</div></div>
         <div class="tile"><div class="v">${d.last_day ? esc(fmtDate(d.last_day)) : '—'}</div><div class="l">last talked</div></div>
       </div>
+      ${isMe ? '' : '<div class="section" id="p-accounts"></div>'}
       ${d.months.length ? `<div class="section">
         <h2>Activity <span class="legend"><span><i style="background:var(--series-1)"></i>You</span><span><i style="background:var(--ramp-light)"></i>${isMe ? 'Others' : esc(name)}</span></span></h2>
         <div class="chart" id="act-chart">${activityChart(d.months)}</div>
@@ -115,9 +123,60 @@ export class People {
           <span class="n">${num(c.messages)} msgs</span>
         </div>`).join('')}</div></div>` : ''}`;
     bindChartTips($('act-chart'));
+    if (!isMe) this.loadAccounts(d.person_id);
+  }
+
+  // Contacts: the accounts behind this person, same-person suggestions, linking/unlinking and renaming.
+  // A change relinks the index on the server, then the page reloads so the list and the graph redraw.
+  async loadAccounts(pid) {
+    let a;
+    try { a = await api(`/api/person/${pid}/accounts`); } catch { return; }
+    if (this.current !== pid || !$('p-accounts')) return;
+    this.accounts = a;
+    $('p-accounts').innerHTML = accountsHtml(a);
+  }
+
+  async change(path, body, busy) {
+    const box = $('p-accounts');
+    box.querySelectorAll('button, input').forEach(b => { b.disabled = true; });
+    box.querySelector('.acct-status').innerHTML = `<span class="dots"><i></i><i></i><i></i></span> ${esc(busy)}… updating your graph`;
+    try {
+      const r = await api(`/api/person/${this.current}/${path}`, { body });
+      location.hash = `#people/${r.person_id ?? this.current}`;
+      location.reload();
+    } catch (e) {
+      box.querySelectorAll('button, input').forEach(b => { b.disabled = false; });
+      box.querySelector('.acct-status').innerHTML = `<span class="bad">${esc(e.message)}</span>`;
+    }
+  }
+
+  async findAccounts(q) {
+    const out = $('acct-found');
+    if (q.length < 2) { out.innerHTML = ''; return; }
+    const { candidates } = await api(`/api/person?name=${encodeURIComponent(q)}`);
+    const c = candidates.filter(c => !c.is_me && c.person_id !== this.current);
+    out.innerHTML = c.length ? `<div class="chats">${c.map(c => personRow(c, `<button class="ghost-btn sm" data-link="${c.person_id}">Link</button>`)).join('')}</div>`
+      : '<p class="placeholder">No one by that name.</p>';
   }
 
   onPersonClick(e) {
+    const b = e.target.closest('button');
+    const a = this.accounts;
+    if (b && a && b.closest('#p-accounts')) {
+      if (b.dataset.link) return this.change('link', { other: +b.dataset.link }, 'Linking');
+      if (b.dataset.unlink) return this.change('unlink', { key: a.accounts[+b.dataset.unlink].key }, 'Unlinking');
+      if (b.dataset.reject) {
+        return api(`/api/person/${this.current}/reject`, { body: { other: +b.dataset.reject } }).then(() => this.loadAccounts(this.current));
+      }
+      if (b.hasAttribute('data-rename')) {
+        const f = $('acct-rename'); f.hidden = !f.hidden;
+        if (!f.hidden) f.querySelector('input').focus();
+        return;
+      }
+      if (b.hasAttribute('data-save-name')) {
+        return this.change('name', { name: $('acct-rename').querySelector('input').value }, 'Renaming');
+      }
+    }
     const s = e.target.closest('[data-session]');
     if (s) { openDrawer(s.dataset.session); return; }
     const d = this.dossier;
@@ -125,6 +184,34 @@ export class People {
     if (e.target.closest('[data-ask]')) this.onAsk(`What do I usually talk about with ${cleanName(d.name)}, and what's the latest between us?`);
     if (e.target.closest('[data-graph]')) this.onShowInGraph(d.person_id, d.name);
   }
+}
+
+function personRow(p, action) {
+  return `<div class="chat-row">
+    <div><div class="ttl">${dot(p.platform)}<span>${esc(cleanName(p.name))}</span></div>
+    <div class="sub">${esc(platformLabel(p.platform))} · ${num(p.messages)} msgs${p.why ? ' · ' + esc(p.why) : ''}</div></div>
+    <span class="acct-acts">${action}</span></div>`;
+}
+
+function accountsHtml(a) {
+  const rows = a.accounts.map((x, i) => `<div class="chat-row">
+    <div><div class="ttl">${dot(x.platform)}<span>${x.key[2] ? 'Deleted account' : esc(x.name)}</span></div>
+    <div class="sub">${esc(platformLabel(x.platform))}${x.key[2] ? ` · in “${esc(x.chat_title || 'a chat')}”` : ''} · ${num(x.messages)} msgs</div></div>
+    <span class="acct-acts">${x.primary ? '<span class="muted">main</span>'
+      : `<button class="ghost-btn sm" data-unlink="${i}" title="Not the same person: split this account off">Unlink</button>`}</span>
+  </div>`).join('');
+  const sugs = a.suggestions.map(s => personRow(s,
+    `<button class="primary-btn sm" data-link="${s.person_id}">Same person</button><button class="ghost-btn sm" data-reject="${s.person_id}">Not them</button>`)).join('');
+  return `<h2>Accounts <span class="muted acct-count">${a.accounts.length} account${a.accounts.length === 1 ? '' : 's'}</span>
+      <button class="ghost-btn sm" data-rename>Rename</button></h2>
+    <div class="acct-rename" id="acct-rename" hidden>
+      <input value="${esc(a.contact_name || cleanName(a.name))}" placeholder="Name shown everywhere"><button class="primary-btn sm" data-save-name>Save</button>
+    </div>
+    <div class="chats">${rows}</div>
+    ${sugs ? `<div class="acct-sugs"><h3>Same person?</h3><div class="chats sug">${sugs}</div></div>` : ''}
+    <div class="acct-find"><input id="acct-q" type="search" placeholder="Link another account of ${esc(cleanName(a.name))}: type a name"></div>
+    <div id="acct-found"></div>
+    <div class="acct-status muted"></div>`;
 }
 
 // Monthly bars, one column per calendar month (gaps included), "you" stacked under "them".
