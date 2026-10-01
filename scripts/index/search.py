@@ -127,7 +127,7 @@ class Searcher:
         if self.encoder_url:
             if getattr(self, "_http", None) is None:   # keep-alive: skip a tunnel round trip per query
                 import httpx
-                self._http = httpx.Client(timeout=60)
+                self._http = httpx.Client(timeout=httpx.Timeout(30, connect=3))
             r = self._http.post(f"{self.encoder_url}/embed", json={"texts": [q], "query": True})
             r.raise_for_status()
             return np.asarray(r.json()["vectors"][0], dtype=np.float32)
@@ -138,7 +138,12 @@ class Searcher:
     def dense(self, q, k=50, include_short=False, mask=None):
         if self.vecs is None:
             return []
-        scores = self.vecs @ self.encode_query(q)
+        try:
+            qv = self.encode_query(q)
+        except Exception as e:   # remote encoder offline (e.g. the Mac is asleep): keyword results only
+            print(f"[search] encoder unavailable, keyword-only: {type(e).__name__}: {e}")
+            return []
+        scores = self.vecs @ qv
         if not include_short:
             scores = np.where(self.embeddable, scores, -1)
         if mask is not None:
