@@ -260,6 +260,15 @@ details.trace summary:hover, details.nums summary:hover { color: var(--text); }
 .f3-tip span { color: var(--muted); }
 .f3-tip p { margin-top: 5px; color: var(--text-2); line-height: 1.45; }
 .f3-tip em { display: block; margin-top: 5px; font-style: normal; font-size: 11px; color: var(--accent-ink); }
+.graph-pane.expanded { position: fixed; inset: 0; z-index: 40; border: 0; animation: fade .2s; }
+#graph-expand .i-close { display: none; }
+.graph-pane.expanded #graph-expand .i-open { display: none; }
+.graph-pane.expanded #graph-expand .i-close { display: block; }
+.a-meta .explore {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 9px;
+  background: var(--grad); color: #fff; font-weight: 500; font-size: 12px; box-shadow: 0 3px 12px rgba(224, 91, 156, .25);
+}
+.a-meta .explore:hover { color: #fff; transform: translateY(-1px); }
 .graph-error {
   position: absolute; left: 50%; top: 50px; transform: translateX(-50%); z-index: 4; max-width: 86%;
   display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border-radius: 10px; font-size: 12.5px;

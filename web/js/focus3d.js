@@ -51,6 +51,27 @@ export function specFromSources(sources, graph) {
   return { nodes: [...nodes.values()], links: dedupe(links) };
 }
 
+export function specFromNodes(ids, graph) {
+  const meId = graph.meId, nodes = [{ id: meId, kind: 'me', label: 'You' }], links = [];
+  const people = ids.filter(x => x.startsWith('P_') && x !== meId).slice(0, 24);
+  const chats = ids.filter(x => x.startsWith('T_')).slice(0, 24);
+  for (const p of people) {
+    const info = graph.infoById(p);
+    if (!info) continue;
+    nodes.push({ id: p, kind: 'person', platform: info.platform, label: cleanName(info.label), size: info.size, pid: +p.slice(2) });
+    links.push([meId, p]);
+  }
+  const has = new Set(nodes.map(n => n.id));
+  for (const t of chats) {
+    const info = graph.infoById(t);
+    if (!info) continue;
+    nodes.push({ id: t, kind: 'chat', platform: info.platform, label: chatName(info.label, info.platform), size: info.size });
+    const linked = graph.neighbours(t).filter(p => has.has(p));
+    if (linked.length) linked.forEach(p => links.push([p, t])); else links.push([meId, t]);
+  }
+  return { nodes, links: dedupe(links) };
+}
+
 export function specFromPerson(d, graph) {
   const meId = graph.meId, pid = d.node, info = graph.infoById(pid);
   const nodes = [
@@ -269,7 +290,7 @@ export class Focus3D {
       const rs = nodes.map(n => n.target.length()).sort((a, b) => a - b);
       const r = rs[Math.floor((rs.length - 1) * 0.9)] || 100;
       const half = (this.camera.fov * Math.PI / 180) / 2, aspect = Math.min(1, this.camera.aspect || 1);
-      const dist = Math.max(260, (r + 30) / Math.tan(half) / aspect * 0.95);
+      const dist = Math.max(420, (r + 30) / Math.tan(half) / aspect * 0.95);
       this.camera.position.set(dist * 0.35, dist * 0.32, dist * 0.88);
       this.controls.target.set(0, 0, 0);
       this.camTo = null;

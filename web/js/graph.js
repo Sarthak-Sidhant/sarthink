@@ -531,6 +531,29 @@ export class Graph {
     }
     return best;
   }
+  neighbours(id) {
+    const i = this.index?.get(id);
+    if (i === undefined) return [];
+    const out = [];
+    for (let k = this.adjStart[i]; k < this.adjStart[i + 1]; k++) out.push(this.ids[this.adj[k]]);
+    return out;
+  }
+  // people (among the ~3000 you talk to most) whose name appears in the text, e.g. an answer
+  peopleIn(text) {
+    if (!this.n || !text) return [];
+    const out = [];
+    for (const i of this.byImportance.slice(0, 3000)) {
+      if (i === this.me) continue;
+      const name = cleanName(this.labels[i]);
+      if (name.length < 4 || /^(Deleted|Deactivated)/.test(name)) continue;
+      const k = text.indexOf(name);
+      if (k < 0) continue;
+      const before = text[k - 1], after = text[k + name.length];
+      if ((!before || !/[\w@]/.test(before)) && (!after || !/\w/.test(after))) out.push(this.ids[i]);
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
   infoById(id) { const i = this.index?.get(id); return i === undefined ? null : this.nodeInfo(i); }
   get meId() { return this.me >= 0 ? this.ids[this.me] : null; }
   nodeInfo(i) {

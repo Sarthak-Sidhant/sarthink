@@ -17,6 +17,8 @@ export class Stage {
     // stand-in until three.js has loaded (it loads on first use, so it can never break the map)
     this.focus = { visible: false, spec: null, has: () => false, hide() {}, rebuild() {}, resize() {}, focus() {}, show() {} };
     $('graph-map').addEventListener('click', () => this.clear());
+    $('graph-expand').addEventListener('click', () => this.expand(!$('graph-pane').classList.contains('expanded')));
+    addEventListener('keydown', e => { if (e.key === 'Escape' && $('graph-pane').classList.contains('expanded')) this.expand(false); });
     $('graph-clear').addEventListener('click', () => this.clear());
   }
   get ready() { return !!this.graph.n; }
@@ -100,6 +102,24 @@ export class Stage {
     this._mapMode();
     this.graph.clear();
     $('graph-clear').hidden = true;
+  }
+
+  // full screen graph (also how "Explore graph" shows it on narrow windows, where the panel is off-screen)
+  expand(on = true) {
+    $('graph-pane').classList.toggle('expanded', on);
+    requestAnimationFrame(() => { this.graph.resize(); this.focus.resize(); });
+  }
+
+  // an answer that cited no conversations: the people and chats it looked at / named
+  async showNodes(nodes, label = 'This answer') {
+    if (!this.ready || !nodes?.length) return false;
+    const m = await this._load();
+    if (!m) { this.highlight(nodes); return true; }
+    const spec = m.specFromNodes(nodes, this.graph);
+    if (spec.nodes.length < 2) return false;
+    const people = spec.nodes.filter(n => n.kind === 'person').length;
+    this._focusMode(spec, `<b>${esc(label)}</b> · ${people} ${people === 1 ? 'person' : 'people'}`);
+    return true;
   }
 
   graphLoaded() { const p = this._pending; this._pending = null; p?.(); }

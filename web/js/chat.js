@@ -72,6 +72,7 @@ export class Chat {
           if (ev.type === 'step') {
             turn.steps.push(ev.text);
             (ev.nodes || []).forEach(n => seen.add(n));
+            turn.nodes = [...seen];
             if (seen.size) this.stage.highlight([...seen], { fly: false });   // the map lights up as it reads
             this.paintProgress(turn);
           } else if (ev.type === 'answer') turn.data = ev.data;
@@ -117,6 +118,9 @@ export class Chat {
       ${numbersHtml(d.steps)}
       ${turn.steps.length ? `<details class="trace"><summary>${lookups} lookups · ${d.seconds}s${d.mode === 'multi' ? ' · deep research' : ''}</summary><ol>${turn.steps.map(t => `<li>${esc(t)}</li>`).join('')}</ol></details>` : ''}
       <div class="a-meta">
+        <button class="explore" data-explore title="Open this answer's graph full screen">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="8" r="2.2"/><circle cx="10" cy="18" r="2.2"/><path d="M8 7l8 1M7 8l2 8M17 10l-6 7"/></svg>
+          Explore graph</button>
         ${nSrc ? `<button data-show-sources>${nSrc} source${nSrc > 1 ? 's' : ''} →</button>` : ''}
         <button data-copy title="Copy answer">Copy</button>
       </div>`;
@@ -128,7 +132,20 @@ export class Chat {
     turn.el?.querySelector('.a').classList.add('selected');
     this.renderSources();
     const srcs = turn.data?.sources || [];
-    if (srcs.length) this.stage.showSources(srcs); else if (fly) this.stage.clear();
+    if (srcs.length) this.stage.showSources(srcs);
+    else this.stage.showNodes(this.answerNodes(turn)).then(ok => { if (!ok && fly) this.stage.clear(); });
+  }
+
+  // what an answer without cited conversations is about: nodes it read while working, plus people it names
+  answerNodes(turn) {
+    return [...new Set([...(turn.nodes || []), ...this.stage.graph.peopleIn(turn.data?.answer || '')])];
+  }
+
+  async explore(turn) {
+    this.select(turn);
+    const srcs = turn.data?.sources || [];
+    if (!srcs.length && !this.answerNodes(turn).length) { this.stage.clear(); }
+    this.stage.expand(true);
   }
 
   renderSources(activeN = null) {
@@ -189,6 +206,7 @@ export class Chat {
     if (e.target.closest('[data-retry]')) { turnEl.remove(); this.turns.splice(this.turns.indexOf(turn), 1); this.ask(turn.q); return; }
     if (e.target.closest('[data-copy]')) { navigator.clipboard?.writeText(turn.data.answer); e.target.textContent = 'Copied'; setTimeout(() => { e.target.textContent = 'Copy'; }, 1200); return; }
     if (!turn.data) return;
+    if (e.target.closest('[data-explore]')) { this.explore(turn); return; }
     const cite = e.target.closest('.cite[data-n]');
     if (this.sel !== turn) this.select(turn, { fly: !cite });
     if (cite) this.focusSource(cite.dataset.n);
@@ -215,7 +233,7 @@ export class Chat {
   save() {
     try {
       const keep = this.turns.filter(t => t.data).slice(-20).map(t => ({
-        q: t.q, steps: t.steps, data: {
+        q: t.q, steps: t.steps, nodes: t.nodes, data: {
           answer: t.data.answer, sources: t.data.sources, seconds: t.data.seconds, mode: t.data.mode,
           steps: (t.data.steps || []).map(s => s.tool === 'run_sql' ? { tool: s.tool, args: s.args, result: s.result } : { tool: s.tool }),
         },
