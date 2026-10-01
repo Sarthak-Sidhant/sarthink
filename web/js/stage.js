@@ -59,11 +59,11 @@ export class Stage {
     $('graph-clear').hidden = !n;
   }
 
-  async showSources(sources) {
+  async showSources(sources, named = []) {
     if (!this.ready) return;   // chat re-selects its answer once the graph has loaded
     const m = await this._load();
     if (!m) { this.highlight([...new Set(sources.flatMap(s => s.nodes))]); return; }
-    const spec = m.specFromSources(sources, this.graph);
+    const spec = await this._enrich(m, m.specFromSources(sources, this.graph), named);
     const people = spec.nodes.filter(n => n.kind === 'person').length, sessions = spec.nodes.filter(n => n.kind === 'session').length;
     this._focusMode(spec, `<b>This answer</b> · ${sessions} conversation${sessions === 1 ? '' : 's'} · ${people} ${people === 1 ? 'person' : 'people'}`);
   }
@@ -111,15 +111,32 @@ export class Stage {
   }
 
   // an answer that cited no conversations: the people and chats it looked at / named
-  async showNodes(nodes, label = 'This answer') {
+  async showNodes(nodes, label = 'This answer', named = []) {
     if (!this.ready || !nodes?.length) return false;
     const m = await this._load();
     if (!m) { this.highlight(nodes); return true; }
-    const spec = m.specFromNodes(nodes, this.graph);
+    let spec = m.specFromNodes(nodes, this.graph);
     if (spec.nodes.length < 2) return false;
-    const people = spec.nodes.filter(n => n.kind === 'person').length;
-    this._focusMode(spec, `<b>${esc(label)}</b> · ${people} ${people === 1 ? 'person' : 'people'}`);
+    spec = await this._enrich(m, spec, named);
+    const people = spec.nodes.filter(n => n.kind === 'person').length, sessions = spec.nodes.filter(n => n.kind === 'session').length;
+    this._focusMode(spec, `<b>${esc(label)}</b> · ${people} ${people === 1 ? 'person' : 'people'}${sessions ? ` · ${sessions} conversations` : ''}`);
     return true;
+  }
+
+  // a thin scene gets depth: the people the answer is about (named in it, or the only ones there)
+  // bring their themes, the conversations under each theme, and their chats
+  async _enrich(m, spec, named = []) {
+    const inScene = spec.nodes.filter(n => n.kind === 'person' && n.pid);
+    const sessions = spec.nodes.filter(n => n.kind === 'session').length;
+    if (sessions >= 6) return spec;
+    const namedSet = new Set(named);
+    let people = inScene.filter(n => namedSet.has(n.id));
+    if (!people.length && inScene.length <= 3) people = inScene;
+    people = people.slice(0, 3);
+    if (!people.length) return spec;
+    $('focus-what').innerHTML = '<b>Building the graph</b> · reading your history…'; $('focus-bar').hidden = false;
+    const ds = (await Promise.allSettled(people.map(p => getDossier(p.pid)))).filter(r => r.status === 'fulfilled').map(r => r.value);
+    return ds.length ? m.enrichSpec(spec, ds, this.graph) : spec;
   }
 
   graphLoaded() { const p = this._pending; this._pending = null; p?.(); }

@@ -72,6 +72,17 @@ export function specFromNodes(ids, graph) {
   return { nodes, links: dedupe(links) };
 }
 
+// add a person's dossier (themes, their conversations, top chats) to a thin scene
+export function enrichSpec(spec, dossiers, graph) {
+  const nodes = [...spec.nodes], links = [...spec.links], ids = new Set(nodes.map(n => n.id));
+  for (const d of dossiers) {
+    const extra = specFromPerson(d, graph);
+    for (const n of extra.nodes) if (!ids.has(n.id)) { nodes.push(n); ids.add(n.id); }
+    links.push(...extra.links);
+  }
+  return { ...spec, nodes, links: dedupe(links) };
+}
+
 export function specFromPerson(d, graph) {
   const meId = graph.meId, pid = d.node, info = graph.infoById(pid);
   const nodes = [
@@ -85,7 +96,7 @@ export function specFromPerson(d, graph) {
     links.push([pid, c.node]);
   }
   d.themes.slice(0, 6).forEach((t, k) => {
-    const tid = `TH_${k}`;
+    const tid = `TH_${d.person_id}_${k}`;
     nodes.push({ id: tid, kind: 'theme', label: t.theme, title: t.description, size: t.sessions });
     links.push([pid, tid]);
     for (const e of t.examples) {

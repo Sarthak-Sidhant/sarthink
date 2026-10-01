@@ -132,8 +132,9 @@ export class Chat {
     turn.el?.querySelector('.a').classList.add('selected');
     this.renderSources();
     const srcs = turn.data?.sources || [];
-    if (srcs.length) this.stage.showSources(srcs);
-    else this.stage.showNodes(this.answerNodes(turn)).then(ok => { if (!ok && fly) this.stage.clear(); });
+    const named = this.stage.graph.peopleIn(turn.data?.answer || '');
+    if (srcs.length) this.stage.showSources(srcs, named);
+    else this.stage.showNodes(this.answerNodes(turn), 'This answer', named).then(ok => { if (!ok && fly) this.stage.clear(); });
   }
 
   // what an answer without cited conversations is about: nodes it read while working, plus people it names
