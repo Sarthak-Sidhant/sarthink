@@ -287,13 +287,26 @@ class PersonProfiles:
         with self.sql.lock:
             return self.sql.conn.execute(sql, args).fetchall()
 
+    def _fingerprint(self, pid):
+        """Changes when an import adds messages or summaries for this person, so the cached profile is rebuilt."""
+        msgs = self._q("SELECT message_count FROM Persons WHERE person_id=?", (pid,))
+        sessions = self._q("""SELECT COUNT(*) FROM Sessions s
+            JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model='deepseek-flash' AND x.prompt_version='v3'
+            WHERE EXISTS (SELECT 1 FROM json_each(s.person_ids) j WHERE j.value = ?)""", (pid,))
+        return [msgs[0][0] if msgs else 0, sessions[0][0]]
+
     def get(self, person_id):
         with self.lock:
             row = self.cache.execute("SELECT data FROM Profiles WHERE person_id=? AND version=?",
                                      (person_id, self.version)).fetchone()
+        fp = self._fingerprint(person_id)
         if row:
-            return json.loads(row[0])
+            prof = json.loads(row[0])
+            # profiles cached before fingerprints existed: still valid while the summarized sessions match
+            if prof.get("fingerprint", [fp[0], prof.get("sessions_summarized")]) == fp:
+                return prof
         prof = self._build(person_id)
+        prof["fingerprint"] = fp
         with self.lock:
             self.cache.execute("INSERT OR REPLACE INTO Profiles VALUES (?,?,?)",
                                (person_id, self.version, json.dumps(prof, ensure_ascii=False)))

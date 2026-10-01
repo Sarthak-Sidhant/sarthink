@@ -128,7 +128,8 @@ def process_discord():
                 db.commit()
 
     db.close()
-    logging.info(f"Successfully processed {len(json_files)} threads and inserted {total_messages} messages for {PLATFORM}.")
+    logging.info(f"Successfully processed {len(json_files)} threads ({total_messages} messages read): "
+                 f"{db.inserted} new messages added for {PLATFORM} (already-stored ones skipped).")
 
 if __name__ == "__main__":
     process_discord()

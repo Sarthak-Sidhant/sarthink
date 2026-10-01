@@ -71,10 +71,24 @@ class Searcher:
         self.conn = connect_index()
         base = OUT_DIR / f"emb_{slug(model)}_{variant}"
         self.model = None
+        current = [r[0] for r in self.conn.execute("SELECT chunk_id FROM Chunks ORDER BY chunk_id")]
+        self.has_vec = None
         if (OUT_DIR / f"{base.name}.npy").exists():
-            self.vecs = np.load(f"{base}.npy").astype(np.float32)
+            vecs = np.load(f"{base}.npy")
             with open(f"{base}.ids.json") as f:
-                self.ids = json.load(f)["ids"]
+                vec_ids = json.load(f)["ids"]
+            if vec_ids != current:
+                # Chunks were rebuilt after an import but not all re-embedded yet: align vectors by chunk id.
+                # New chunks are keyword-only until embedded; vectors of chunks that no longer exist are dropped.
+                pos = {cid: i for i, cid in enumerate(vec_ids)}
+                rows = np.fromiter((pos.get(cid, -1) for cid in current), dtype=np.int64, count=len(current))
+                self.has_vec = rows >= 0
+                vecs = vecs[np.maximum(rows, 0)]
+                vecs[~self.has_vec] = 0
+                print(f"[search] {int((~self.has_vec).sum())} of {len(current)} chunks have no vector yet "
+                      f"(keyword search only until embedded)")
+            self.vecs = vecs.astype(np.float32)
+            self.ids = current
             if not self.encoder_url:
                 from sentence_transformers import SentenceTransformer
                 import torch
@@ -83,7 +97,7 @@ class Searcher:
                 self.model = SentenceTransformer(model, device=dev, **kw)
         else:  # keyword-only mode until embeddings are built
             self.vecs = None
-            self.ids = [r[0] for r in self.conn.execute("SELECT chunk_id FROM Chunks ORDER BY chunk_id")]
+            self.ids = current
         self.row = {cid: i for i, cid in enumerate(self.ids)}
         self.me_boost = me_boost
         n = len(self.ids)
@@ -146,6 +160,8 @@ class Searcher:
         scores = self.vecs @ qv
         if not include_short:
             scores = np.where(self.embeddable, scores, -1)
+        if self.has_vec is not None:
+            scores = np.where(self.has_vec, scores, -np.inf)
         if mask is not None:
             scores = np.where(mask, scores, -np.inf)
         k = min(k, int(np.isfinite(scores).sum()))

@@ -2,6 +2,7 @@ import sqlite3
 import json
 import os
 import logging
+from collections import Counter, defaultdict
 from datetime import datetime
 
 class SarthinkMemoryLayer:
@@ -9,9 +10,17 @@ class SarthinkMemoryLayer:
         SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
         REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
-        self.db_path = db_path if db_path else os.path.join(REPO_ROOT, 'processed_data', 'db', 'sarthink_memory.db')
-        self.jsonl_dir = jsonl_dir if jsonl_dir else os.path.join(REPO_ROOT, 'processed_data', 'logs')
+        # Same data folder as scripts/index/common.py: SARTHINK_DATA (e.g. a test copy), else processed_data/
+        data_dir = os.environ.get("SARTHINK_DATA") or os.path.join(REPO_ROOT, 'processed_data')
+        if not os.path.isabs(data_dir):
+            data_dir = os.path.join(REPO_ROOT, data_dir)
+        self.db_path = db_path if db_path else os.path.join(data_dir, 'db', 'sarthink_memory.db')
+        self.jsonl_dir = jsonl_dir if jsonl_dir else os.path.join(data_dir, 'logs')
         self.open_jsonl_files = {}
+        # Content dedupe for sources without stable message ids (see stored_copy)
+        self._content_counts: dict[int, dict] = {}   # thread -> (ts, text) -> [msg_id]
+        self._seen_in_source: Counter = Counter()
+        self.inserted = 0
 
         # In-memory lookup caches: eliminates N+1 SELECT queries during parsing.
         # Format: (platform, raw_id) -> int db_id
@@ -163,6 +172,10 @@ class SarthinkMemoryLayer:
 
             if self.cursor.rowcount > 0:
                 # Fresh insert — write to JSONL
+                self.inserted += 1
+                stored = self._content_counts.get(thread_id)
+                if stored is not None:
+                    stored[(timestamp_utc, content)].append(msg_id)
                 if json_data and jsonl_filename:
                     self._write_jsonl(jsonl_filename, json_data)
 
@@ -188,10 +201,47 @@ class SarthinkMemoryLayer:
         except sqlite3.Error as e:
             logging.error(f"DB Insert Error for {msg_id}: {e}")
 
+    # ─── Appending exports without stable message ids ─────────────────────────
+
+    def begin_source(self):
+        """Call once per export file (e.g. per zip) before inserting its messages."""
+        self._seen_in_source = Counter()
+
+    def stored_copy(self, thread_id, timestamp_utc, content):
+        """msg_id of the stored copy of this message, matched by (thread, second, text), or None if it is new.
+
+        For exports whose message ids are positional (Meta: index inside message_N.json), a newer export
+        gives the same message a different id. Repeats are counted, so the k-th "ok" sent in the same
+        second of the same chat matches the k-th stored one, and is new only if fewer are stored.
+        """
+        if timestamp_utc == 0:
+            timestamp_utc = None
+        stored = self._content_counts.get(thread_id)
+        if stored is None:
+            stored = self._content_counts[thread_id] = defaultdict(list)
+            for t, c, mid in self.cursor.execute(
+                    "SELECT timestamp_utc, content, msg_id FROM Messages WHERE thread_id = ? ORDER BY rowid",
+                    (thread_id,)).fetchall():
+                stored[(t, c)].append(mid)
+        key = (timestamp_utc, content)
+        k = self._seen_in_source[(thread_id, key)]
+        self._seen_in_source[(thread_id, key)] += 1
+        ids = stored.get(key, ())
+        return ids[k] if k < len(ids) else None
+
+    def free_msg_id(self, msg_id):
+        """msg_id, or msg_id with a suffix if a different message already uses it."""
+        candidate, n = msg_id, 1
+        while self.cursor.execute("SELECT 1 FROM Messages WHERE msg_id = ?", (candidate,)).fetchone():
+            candidate, n = f"{msg_id}~{n}", n + 1
+        return candidate
+
     # ─── Maintenance ──────────────────────────────────────────────────────────
 
     def purge_platform(self, platform):
-        """Delete all data for a platform so it can be re-ingested cleanly.
+        """Delete all data for a platform so it can be re-ingested cleanly. Only for parsers run with --fresh:
+        it drops messages missing from the newer export and renumbers Users/Threads ids, which the index layer
+        (PersonNameGuesses, graph T_ nodes) is keyed on.
         Caches are refreshed after purge so subsequent get_or_create_* calls
         work correctly on the now-empty tables.
         """
