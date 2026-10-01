@@ -34,7 +34,7 @@ random.seed(42)   # deterministic jitter
 # ─── Platform topology ────────────────────────────────────────────────────────
 # Master sphere radius — platform centroids sit on this sphere in 3D space
 MASTER_R = 2200
-PLATFORM_ORDER = ['twitter', 'reddit', 'instagram', 'discord', 'facebook']
+PLATFORM_ORDER = ['twitter', 'reddit', 'instagram', 'discord', 'facebook', 'whatsapp']
 
 # Platform sphere scale (relative to sqrt-count formula)
 PLATFORM_SCALE = {
@@ -43,6 +43,7 @@ PLATFORM_SCALE = {
     'instagram': 0.35,
     'discord':   0.22,
     'facebook':  0.22,
+    'whatsapp':  0.5,
 }
 
 # Within each platform, group types map to a radial fraction of the cluster.
@@ -205,7 +206,7 @@ def compute_galaxy_layout(nodes: list[dict]) -> dict[str, tuple]:
 R_IN = 250      # radius of my closest people
 R_OUT = 5200    # outer shell: people I barely interacted with
 PLATFORM_OFFSET = 5000  # push each platform's cloud this far out along its axis, to separate clusters
-PLATFORM_CONE = {'twitter': 62, 'reddit': 50, 'instagram': 38, 'discord': 30, 'facebook': 26}  # cap half-angle, degrees
+PLATFORM_CONE = {'twitter': 62, 'reddit': 50, 'instagram': 38, 'discord': 30, 'facebook': 26, 'whatsapp': 50}  # cap half-angle, degrees
 
 
 def _unit(v):

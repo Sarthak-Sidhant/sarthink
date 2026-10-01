@@ -44,6 +44,8 @@ GROUP_COLORS = {
     "facebook_user":           "#FFFFFF",  # white/silver (not Facebook blue, same reason)
     "facebook_comment_thread": "#90A4AE",
     "facebook_dm_group":       "#CFD8DC",
+    "whatsapp_user":           "#B388FF",  # violet (not WhatsApp green: Discord already uses green)
+    "whatsapp_dm_group":       "#7C4DFF",
 }
 
 OUT_DIR = GRAPH_DIR
@@ -52,8 +54,8 @@ OUT_DIR = GRAPH_DIR
 def thread_group(platform, title, platform_thread_id):
     t = (title or "").strip()
     tl = t.lower()
-    if platform == "discord":
-        return "discord_dm_group"
+    if platform in ("discord", "whatsapp"):
+        return f"{platform}_dm_group"
     if platform in ("facebook", "instagram"):
         return f"{platform}_comment_thread" if tl.startswith("comment on") else f"{platform}_dm_group"
     if platform == "reddit":

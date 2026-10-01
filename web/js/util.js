@@ -23,6 +23,7 @@ export const PLATFORMS = [
   { key: 'discord', label: 'Discord', slot: '--series-3' },
   { key: 'facebook', label: 'Facebook', slot: '--series-4' },
   { key: 'instagram', label: 'Instagram', slot: '--series-5' },
+  { key: 'whatsapp', label: 'WhatsApp', slot: '--series-6' },
 ];
 export function platformOf(s) {
   s = String(s || '').toLowerCase();

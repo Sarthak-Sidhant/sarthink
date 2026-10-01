@@ -76,7 +76,7 @@ MEDIA_RE = re.compile(
     r"\[?attachment\]?|image omitted|video omitted|sticker omitted)\s*$", re.I)
 
 PLATFORM_LABEL = {"twitter": "Twitter", "reddit": "Reddit", "discord": "Discord",
-                  "instagram": "Instagram", "facebook": "Facebook"}
+                  "instagram": "Instagram", "facebook": "Facebook", "whatsapp": "WhatsApp"}
 
 HEAD_CAP = 80        # tokens of ancestor context prefixed to tree windows
 SESSION_CAP = 3000   # max tokens per session (LLM read unit)
@@ -169,9 +169,14 @@ def group_conversations(msgs, threads):
     return list(convs.values())
 
 
-def classify(conv):
+CHAT_PLATFORMS = {"whatsapp"}   # always chats: heavy quote-replying must not reorder them as a tree
+
+
+def classify(conv, platform=None):
     """tree if a meaningful share of all messages reply to something other than the previous
     message (comment trees). Chats with occasional reply-to quotes (Discord) stay chats."""
+    if platform in CHAT_PLATFORMS:
+        return "chat"
     if len(conv) < 3:
         return "chat" if len({m["thread"] for m in conv}) == 1 and not any(m["parent"] for m in conv) else "tree"
     branching = sum(1 for prev, m in zip(conv, conv[1:]) if m["parent"] and m["parent"] != prev["id"])
@@ -315,8 +320,8 @@ def build(gap_min, target, overlap):
     stats = defaultdict(int)
 
     for conv in convs:
-        structure = classify(conv)
         platform = threads[conv[0]["thread"]]["platform"]
+        structure = classify(conv, platform)
         if structure == "chat":
             units = []
             for u in chat_units(conv):

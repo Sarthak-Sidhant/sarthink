@@ -29,7 +29,7 @@ MAX_STEPS = 10
 SQL_ROW_LIMIT = 50
 
 SYSTEM = """You are Sarthink, the private memory of Sarthak Sidhant. Your knowledge is his archive of
-302k messages across Twitter/X, Reddit, Discord, Instagram and Facebook (2011 to early 2026). You answer his
+messages across WhatsApp, Twitter/X, Reddit, Discord, Instagram and Facebook (2011 to 2026). You answer his
 questions about his own life, conversations and people, speaking to him as "you".
 
 Today is {today}. Message timestamps and dates in tool results are IST (Sarthak's timezone). The short AI
@@ -88,7 +88,7 @@ TOOLS = [
                              "description": "up to 3 other phrasings (e.g. Hinglish, synonyms, how Sarthak would "
                                             "have written it); results of all phrasings are merged"},
             "person": {"type": "string", "description": "only chats with this person (name or P_<id>)"},
-            "platform": {"type": "string", "enum": ["twitter", "reddit", "discord", "instagram", "facebook"]},
+            "platform": {"type": "string", "enum": ["whatsapp", "twitter", "reddit", "discord", "instagram", "facebook"]},
             "since": {"type": "string", "description": "YYYY-MM-DD"},
             "until": {"type": "string", "description": "YYYY-MM-DD"},
             "me_only": {"type": "boolean", "description": "only conversations Sarthak took part in"},
@@ -212,7 +212,7 @@ class SqlTool:
               SELECT person_id, name, is_me, platform, placeholder, message_count FROM Persons;
             CREATE TEMP VIEW threads AS
               SELECT id AS thread_id, platform, title,
-                     CASE WHEN platform = 'discord' OR lower(title) LIKE 'dm%'
+                     CASE WHEN platform IN ('discord', 'whatsapp') OR lower(title) LIKE 'dm%'
                                OR (platform IN ('instagram','facebook') AND lower(title) NOT LIKE 'comment on%')
                                OR platform_thread_id LIKE '%:reddit.com%' THEN 1 ELSE 0 END AS is_dm
               FROM src.Threads;
@@ -452,7 +452,7 @@ def describe(name, args, res):
 
 
 PLANNER = """You plan research for a personal-memory assistant over Sarthak's chat archive (Twitter, Reddit,
-Discord, Instagram, Facebook; 2011-2026). Today is {today}.
+Discord, Instagram, Facebook, WhatsApp; 2011-2026). Today is {today}.
 
 Decide if the question needs ONE line of research ("simple": a specific lookup, one count, one person's
 single fact) or SEVERAL independent lines worth running in parallel:

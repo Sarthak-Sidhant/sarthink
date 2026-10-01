@@ -107,9 +107,26 @@ def build_prompt(conn, sess):
     return "\n\n".join(parts), [c["chunk_id"] for c in chunks]
 
 
-async def summarize_one(client, model, sess_id, prompt, chunk_ids, sem, thinking, retries=4):
+def deepseek_peak(now=None):
+    """DeepSeek bills double on weekdays 01:00-04:00 and 06:00-10:00 UTC (06:30-09:30, 11:30-15:30 IST)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return now.weekday() < 5 and (1 <= now.hour < 4 or 6 <= now.hour < 10)
+
+
+async def wait_offpeak():
+    announced = False
+    while deepseek_peak():
+        if not announced:
+            print("  peak hours: pausing until the off-peak rate applies (resumable, nothing lost)", flush=True)
+            announced = True
+        await asyncio.sleep(60)
+
+
+async def summarize_one(client, model, sess_id, prompt, chunk_ids, sem, thinking, retries=4, offpeak_only=False):
     async with sem:
         for attempt in range(retries):
+            if offpeak_only:
+                await wait_offpeak()
             try:
                 r = await client.chat.completions.create(
                     model=model,
@@ -145,7 +162,7 @@ async def run(a):
         "SELECT session_id FROM SessionSummaries WHERE model=? AND prompt_version=?", (a.model, PROMPT_VERSION))}
     sessions = [s for s in conn.execute(
         "SELECT * FROM Sessions WHERE token_count >= ? ORDER BY start_ts", (a.min_tokens,)).fetchall()
-        if s["session_id"] not in done]
+        if s["session_id"] not in done and (not a.platform or s["platform"] == a.platform)]
     if a.sample:
         random.Random(a.seed).shuffle(sessions)
     if a.limit:
@@ -156,7 +173,8 @@ async def run(a):
     jobs = []
     for s in sessions:
         prompt, chunk_ids = build_prompt(conn, s)
-        jobs.append(summarize_one(client, a.model, s["session_id"], prompt, chunk_ids, sem, a.thinking))
+        jobs.append(summarize_one(client, a.model, s["session_id"], prompt, chunk_ids, sem, a.thinking,
+                                  offpeak_only=a.offpeak_only))
 
     t0, ok, failed, tin, tout = time.time(), 0, 0, 0, 0
     now = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -194,4 +212,6 @@ if __name__ == "__main__":
     ap.add_argument("--concurrency", type=int, default=16)
     ap.add_argument("--tag", default="")
     ap.add_argument("--thinking", action="store_true", help="let the model reason before answering (slower, costlier)")
+    ap.add_argument("--offpeak-only", action="store_true", help="pause during DeepSeek peak hours (half price otherwise)")
+    ap.add_argument("--platform", default=None, help="only sessions from this platform (e.g. whatsapp)")
     asyncio.run(run(ap.parse_args()))

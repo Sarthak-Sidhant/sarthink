@@ -31,7 +31,7 @@
   --shadow: 0 1px 2px rgba(40, 60, 110, .05), 0 6px 24px rgba(40, 60, 110, .07);
   --shadow-lg: 0 12px 48px rgba(40, 60, 110, .18);
   /* platform slots, fixed order (validated: CVD-safe adjacent pairs on this surface) + the activity ramp */
-  --series-1: #2f8fe0; --series-2: #f0754f; --series-3: #1fa595; --series-4: #7a63dd; --series-5: #e05b9c;
+  --series-1: #2f8fe0; --series-2: #f0754f; --series-3: #1fa595; --series-4: #7a63dd; --series-5: #e05b9c; --series-6: #c9900c;
   --me: #18223a;
   --ramp-light: #f4b3d3;
   --graph-bg: #f7faff;
@@ -60,7 +60,7 @@
   --accent-2: #ee7fb6; --accent-2-soft: rgba(238, 127, 182, .16);
   --good: #3cbf8a; --warn: #e0a030; --bad: #ef6b8c;
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 24px rgba(0, 0, 0, .3); --shadow-lg: 0 12px 48px rgba(0, 0, 0, .55);
-  --series-1: #3a93e0; --series-2: #e0683f; --series-3: #1d9a8b; --series-4: #8f7bf0; --series-5: #d9559a;
+  --series-1: #3a93e0; --series-2: #e0683f; --series-3: #1d9a8b; --series-4: #8f7bf0; --series-5: #d9559a; --series-6: #e0a83a;
   --me: #eef2fb; --ramp-light: #6b3a5c;
   --graph-bg: #10162a;
   --graph-wash:

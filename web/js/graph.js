@@ -263,7 +263,7 @@ export class Graph {
       accent: css('--accent'), accent2: css('--accent-2'), surface: css('--surface'),
       edgeAlpha: parseFloat(css('--graph-edge-alpha')) || 0.05,
       dark: document.documentElement.dataset.theme === 'dark',
-      plat: { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5'), other: css('--muted') },
+      plat: { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5'), whatsapp: css('--series-6'), other: css('--muted') },
     };
     if (this.order) {
       const platRGB = Object.fromEntries(Object.entries(this.colors.plat).map(([k, v]) => [k, rgba(v)]));

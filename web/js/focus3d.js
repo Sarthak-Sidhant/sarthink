@@ -234,7 +234,7 @@ export class Focus3D {
     this._clear();
     this.spec = spec; this.focusId = null;
     const dark = document.documentElement.dataset.theme === 'dark';
-    const plat = { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5') };
+    const plat = { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5'), whatsapp: css('--series-6') };
     const colorOf = n => n.kind === 'me' ? '#9a8cf0' : n.kind === 'theme' ? '#c48ae6' : plat[n.platform] || css('--accent');
     const nodes = spec.nodes.map((n, k) => ({ ...n, k, color: colorOf(n) }));
     this.nodes = nodes; this.byId = new Map(nodes.map(n => [n.id, n]));

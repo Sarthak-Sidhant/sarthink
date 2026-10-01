@@ -6,8 +6,11 @@ else), write a short title, and resolve relative dates ("Monday", "in 3 days") a
 Output: Commitments table in the index DB (derived, with session provenance). Status (done / dismissed /
 added to calendar) lives in the user's notes DB and survives rebuilds.
 
-Usage: python3 scripts/index/build_commitments.py
+Usage: python3 scripts/index/build_commitments.py              rebuild the inbox from all summaries
+       python3 scripts/index/build_commitments.py --tag whatsapp only sessions summarized with that tag (e.g. a
+                                                                new import); existing items are kept as they are
 """
+import argparse
 import concurrent.futures as cf
 import datetime as dt
 import hashlib
@@ -39,7 +42,7 @@ CREATE TABLE Commitments (
 );"""
 
 
-def main():
+def main(tag=None):
     client = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
     conn = connect_index()
     names = {r[0]: r[1] for r in conn.execute("SELECT person_id, name FROM Persons")}
@@ -47,7 +50,8 @@ def main():
     for sid, data, ts, plat, pids, tids in conn.execute("""
             SELECT x.session_id, x.data, s.start_ts, s.platform, s.person_ids, s.thread_ids
             FROM SessionSummaries x JOIN Sessions s USING(session_id)
-            WHERE x.model = 'deepseek-flash' AND x.prompt_version = 'v3'"""):
+            WHERE x.model = 'deepseek-flash' AND x.prompt_version = 'v3' AND (? IS NULL OR x.tag = ?)""",
+            (tag, tag)):
         for cm in json.loads(data).get("commitments") or []:
             if isinstance(cm, dict) and cm.get("what"):
                 items.append({"sid": sid, "day": dt.datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d"),
@@ -84,7 +88,8 @@ def main():
                              (o.get("title") or it["what"])[:120], it["what"], due, it["day"], it["platform"],
                              json.dumps([names.get(p, "?") for p in it["pids"] if p != 1]),
                              json.dumps([f"P_{p}" for p in it["pids"]] + [f"T_{t}" for t in it["tids"]])))
-    conn.executescript(SCHEMA)
+    if tag is None:                     # full rebuild; with --tag the new rows are added to the existing inbox
+        conn.executescript(SCHEMA)
     conn.executemany("INSERT OR REPLACE INTO Commitments VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     mine = sum(r[2] == "me" for r in rows)
@@ -93,4 +98,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", help="only sessions whose summary has this tag; keep existing commitments")
+    main(ap.parse_args().tag)

@@ -114,7 +114,7 @@ The full pipeline (each step is rerunnable; IDs are deterministic so rebuilds on
 
 ```bash
 # 1. parse exports into processed_data/db/sarthink_memory.db
-python3 scripts/parsers/{twitter,reddit,discord,meta}_parser.py      # see scripts/parsers for expected inputs
+python3 scripts/parsers/{twitter,reddit,discord,meta,whatsapp}_parser.py   # see scripts/parsers for expected inputs
 python3 scripts/context/{twitter,reddit}_fetch_context.py            # optional: fetch missing parent posts
 # 2. build the memory index (processed_data/db/sarthink_index.db)
 python3 scripts/index/build_identity.py          # people; your handles come from config/identity_map.json
@@ -138,6 +138,26 @@ the graph stay attached to the right person. Unchanged conversations keep their 
 `summarize_sessions.py` only pays for new ones, and until the new chunks are embedded search finds them by
 keyword. Don't delete `sarthink_index.db` to update: it holds the paid-for summaries.
 `--fresh` on the Twitter/Meta parsers wipes that platform and reparses it; it is not needed for updates.
+
+Only new chunks need summaries and vectors. For a large import, summarize just that platform, tagged, at
+DeepSeek's off-peak rate, then embed only the chunks without a vector on a rented GPU and merge them:
+
+```bash
+python3 scripts/index/summarize_sessions.py --platform whatsapp --tag whatsapp --offpeak-only --limit 50 --sample  # cost test
+python3 scripts/index/summarize_sessions.py --platform whatsapp --tag whatsapp --offpeak-only
+python3 scripts/index/build_commitments.py --tag whatsapp           # inbox items for those sessions only
+python3 scripts/index/export_missing_chunks.py new.jsonl.gz         # -> remote_embed_batch.py on the GPU box
+python3 scripts/index/merge_embeddings.py <downloaded_prefix>
+```
+
+### WhatsApp (Android)
+
+Decrypt the backup with [wa-crypt-tools](https://github.com/ElDavoo/wa-crypt-tools)
+(`wadecrypt <64-digit key> msgstore.db.crypt15 archive/whatsapp-msgstore.db`), then run
+`python3 scripts/parsers/whatsapp_parser.py`. Backups carry no contact names (the contacts table is left out of
+`wa.db`), so people show their WhatsApp profile name or a masked number; export your phone contacts to
+`archive/whatsapp-contacts.vcf` and rerun the parser to rename them in place. Message ids are WhatsApp's own,
+so a newer backup appends.
 
 `scripts/demo/generate_demo.py` shows how the demo archive was generated and is a template for testing.
 
