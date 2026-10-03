@@ -1,9 +1,20 @@
 import sqlite3
 import json
 import os
+import re
 import logging
 from collections import Counter, defaultdict
 from datetime import datetime
+
+def same_text(content):
+    """A message's text as compared between exports: Meta rewords its own notices from one export to the next
+    ("Instagram User" / "Instagram user", "https://www.instagram.com/…" / "https://instagram.com/…",
+    "created the group chat." / "created the group.")."""
+    if not content:
+        return content
+    c = content.lower().replace("://www.", "://").replace("group chat", "group")
+    return re.sub(r"[\W_]+", "", c) or c
+
 
 class SarthinkMemoryLayer:
     def __init__(self, db_path=None, jsonl_dir=None):
@@ -118,6 +129,14 @@ class SarthinkMemoryLayer:
         self._user_cache[key] = db_id
         return db_id
 
+    def thread_with_suffix(self, platform, number):
+        """(id, platform_thread_id, title) of the thread whose key is <number> or <anything>_<number>, or None.
+        Meta names a chat's folder <username>_<number>; the username part changes when someone renames."""
+        return self.cursor.execute(
+            "SELECT id, platform_thread_id, title FROM Threads WHERE platform = ? AND "
+            "(platform_thread_id = ? OR platform_thread_id LIKE '%\\_' || ? ESCAPE '\\') ORDER BY id LIMIT 1",
+            (platform, number, number)).fetchone()
+
     def get_or_create_thread(self, platform, platform_thread_id, title):
         """Returns the integer DB id for the thread, creating it if needed.
         Does NOT commit immediately — caller owns the commit cadence."""
@@ -175,7 +194,7 @@ class SarthinkMemoryLayer:
                 self.inserted += 1
                 stored = self._content_counts.get(thread_id)
                 if stored is not None:
-                    stored[(timestamp_utc, content)].append(msg_id)
+                    stored[(timestamp_utc, same_text(content))].append(msg_id)
                 if json_data and jsonl_filename:
                     self._write_jsonl(jsonl_filename, json_data)
 
@@ -211,7 +230,7 @@ class SarthinkMemoryLayer:
         """msg_id of the stored copy of this message, matched by (thread, second, text), or None if it is new.
 
         For exports whose message ids are positional (Meta: index inside message_N.json), a newer export
-        gives the same message a different id. Repeats are counted, so the k-th "ok" sent in the same
+        gives the same message a different id, and may word it slightly differently (same_text). Repeats are counted, so the k-th "ok" sent in the same
         second of the same chat matches the k-th stored one, and is new only if fewer are stored.
         """
         if timestamp_utc == 0:
@@ -222,8 +241,8 @@ class SarthinkMemoryLayer:
             for t, c, mid in self.cursor.execute(
                     "SELECT timestamp_utc, content, msg_id FROM Messages WHERE thread_id = ? ORDER BY rowid",
                     (thread_id,)).fetchall():
-                stored[(t, c)].append(mid)
-        key = (timestamp_utc, content)
+                stored[(t, same_text(c))].append(mid)
+        key = (timestamp_utc, same_text(content))
         k = self._seen_in_source[(thread_id, key)]
         self._seen_in_source[(thread_id, key)] += 1
         ids = stored.get(key, ())

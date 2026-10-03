@@ -12,7 +12,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
 # Inject utils path for database import
 sys.path.append(os.path.join(REPO_ROOT, "scripts", "utils"))
-from database import SarthinkMemoryLayer
+from database import SarthinkMemoryLayer, same_text
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -120,7 +120,31 @@ def build_participant_id_map(thread_path: str, participants: list, platform: str
 
 # ─── Main parser ─────────────────────────────────────────────────────────────
 
-def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_persona="User"):
+PLACEHOLDER_TITLE = re.compile(r'^\s*(instagram|facebook) user\s*$|^\s*$', re.I)
+
+# a conversation's messages: message_1.json, message_2.json… (other .json under a chat folder are attachments)
+MSG_FILE = re.compile(r'messages/inbox/[^/]+/message_\d+\.json$')
+
+
+def profile_ego_id(zip_path):
+    """Your account id (User ID, else email) from an export's profile file, or None: a large export comes split
+    into several zips and only one of them carries the profile."""
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        for pf in [f for f in z.namelist() if 'personal_information.json' in f or 'profile_information.json' in f]:
+            try:
+                data = json.loads(z.read(pf))
+                users = data.get('profile_user', []) or data.get('profile_info', [])
+                if users and isinstance(users, list):
+                    info = users[0].get('string_map_data', {})
+                    found = info.get('User ID', {}).get('value') or info.get('Email', {}).get('value')
+                    if found:
+                        return str(found)
+            except Exception:
+                pass
+    return None
+
+
+def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_persona="User", ego_hint=None):
     logging.info(f"Scanning {platform} archive: {zip_path}")
 
     # Ego names for this platform (lowercased set for fast membership test)
@@ -131,39 +155,13 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
         file_list = z.namelist()
 
         # ── Identify Ego ──────────────────────────────────────────────────────
-        # Start with a synthetic fallback; try to resolve a real ID from profile files.
-        ego_id   = f"{platform}_ego_user"
+        # your id from this zip's profile, else from another part of the same export, else a synthetic one
+        ego_id   = profile_ego_id(zip_path) or ego_hint or f"{platform}_ego_user"
         ego_name = master_persona
-
-        profile_files = [
-            f for f in file_list
-            if 'personal_information.json' in f or 'profile_information.json' in f
-        ]
-        for pf in profile_files:
-            try:
-                profile_data = json.loads(z.read(pf))
-                user_list = (
-                    profile_data.get('profile_user', []) or
-                    profile_data.get('profile_info', [])
-                )
-                if user_list and isinstance(user_list, list):
-                    info = user_list[0].get('string_map_data', {})
-                    potential_id = (
-                        info.get('User ID', {}).get('value') or
-                        info.get('Email', {}).get('value')
-                    )
-                    if potential_id:
-                        ego_id = str(potential_id)
-                        logging.info(f"Resolved {platform} ego ID from profile: {ego_id}")
-                        break
-            except Exception:
-                pass
+        logging.info(f"{platform} ego ID: {ego_id}")
 
         # ── Parse DMs ─────────────────────────────────────────────────────────
-        msg_files = [
-            f for f in file_list
-            if 'messages/inbox/' in f and f.endswith('.json')
-        ]
+        msg_files = [f for f in file_list if MSG_FILE.search(f)]
         logging.info(f"Found {len(msg_files)} DM files for {platform}.")
 
         for mf in msg_files:
@@ -175,6 +173,15 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
                 # convo_id from thread_path for stable DB key
                 convo_id    = thread_path.split('/')[-1] if thread_path else mf.split('messages/inbox/')[1].split('/')[0]
                 thread_title = decode_meta_string(data.get('title', f"DM {convo_id}"))
+                # a renamed account renames the chat folder (<username>_<number>): same number, same chat.
+                # Keep the stored key (ids hang off it) and take the newer title
+                num = re.search(r'(\d{6,})$', convo_id)
+                old = db.thread_with_suffix(platform, num.group(1)) if num else None
+                if old and old[1] != convo_id:
+                    convo_id = old[1]
+                    # a deactivated account turns a real name into "Instagram user": never trade down
+                    if old[2] != thread_title and not PLACEHOLDER_TITLE.match(thread_title):
+                        db.cursor.execute("UPDATE Threads SET title = ? WHERE id = ?", (thread_title, old[0]))
                 thread_db_id = db.get_or_create_thread(platform, convo_id, thread_title)
 
                 # Build participant → stable_id map for this thread
@@ -266,6 +273,14 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
             and f.endswith('.json')
         ]
 
+        # your comments already stored, by (second, text), whichever post they were filed under: newer exports
+        # can drop the post owner's name ("unknown_media"), which would file a stored comment under a new post
+        stored_comments = set()
+        for ts_, c_ in db.cursor.execute(
+                "SELECT m.timestamp_utc, m.content FROM Messages m JOIN Threads t ON t.id = m.thread_id "
+                "WHERE t.platform = ? AND t.title LIKE 'Comment on %'", (platform,)):
+            stored_comments.add((ts_, same_text(c_)))
+
         for cf in comment_files:
             try:
                 data  = json.loads(z.read(cf))
@@ -294,6 +309,8 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
                     if not content:
                         continue
 
+                    if (ts or None, same_text(content)) in stored_comments:
+                        continue
                     thread_db_id = db.get_or_create_thread(platform, owner, f"Comment on {owner[:40]}")
                     if db.stored_copy(thread_db_id, ts, content):
                         continue
@@ -326,10 +343,10 @@ def process_meta_zip(db, zip_path, platform, counters, ego_aliases, master_perso
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-def process_all_meta(fresh=False):
-    """Add every Instagram/Facebook zip in archive/ to the DB. Messages already stored (from this or an
-    older export) are skipped, so a newer export can sit next to the old one: nothing is deleted, and
-    messages that only the old export still has are kept."""
+def process_all_meta(fresh=False, paths=None):
+    """Add Instagram/Facebook zips to the DB: the given paths, else every one in archive/. Messages already
+    stored (from this or an older export) are skipped, so a newer export can sit next to the old one: nothing
+    is deleted, and messages that only the old export still has are kept."""
     # Load ego aliases from config before touching the DB
     ego_aliases, master_persona = load_meta_ego_aliases()
 
@@ -350,14 +367,18 @@ def process_all_meta(fresh=False):
         db.close()
         return
 
-    for arc in sorted(os.listdir(archive_dir)):
-        if not arc.endswith('.zip'):
-            continue
-        arc_path = os.path.join(archive_dir, arc)
-        if 'instagram' in arc.lower():
-            process_meta_zip(db, arc_path, 'instagram', counters, ego_aliases, master_persona)
-        elif 'facebook' in arc.lower():
-            process_meta_zip(db, arc_path, 'facebook', counters, ego_aliases, master_persona)
+    zips = paths or [os.path.join(archive_dir, a) for a in sorted(os.listdir(archive_dir)) if a.endswith('.zip')]
+    by_platform = {}
+    for z in zips:
+        name = os.path.basename(z).lower()
+        plat = 'instagram' if 'instagram' in name else 'facebook' if 'facebook' in name else None
+        if plat:
+            by_platform.setdefault(plat, []).append(z)
+    for plat, group in by_platform.items():
+        # your id, from whichever part of the export has the profile (the others are media/other chats)
+        ego = next((e for e in map(profile_ego_id, group) if e), None)
+        for z in group:
+            process_meta_zip(db, z, plat, counters, ego_aliases, master_persona, ego_hint=ego)
 
     db.commit()
     db.close()
@@ -367,4 +388,6 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Add Instagram/Facebook exports from archive/ to the DB.")
     ap.add_argument("--fresh", action="store_true", help="wipe instagram+facebook first (not needed to update)")
-    process_all_meta(fresh=ap.parse_args().fresh)
+    ap.add_argument("zips", nargs="*", help="export zips to add (default: every Instagram/Facebook zip in archive/)")
+    a = ap.parse_args()
+    process_all_meta(fresh=a.fresh, paths=a.zips or None)

@@ -131,9 +131,21 @@ python3 run.py --model 0.6b                      # or: python3 run.py --gpu <ssh
 
 ### Adding a newer export
 
-Put the new export next to the old one in `archive/` (keep the old one) and rerun the same steps. Parsers only
+```bash
+python3 scripts/update.py ~/Downloads/instagram-*.zip         # every part of the export; WhatsApp: msgstore.db
+```
+
+`update.py` backs up the databases, adds what's new, reports it (messages per platform and month, new and
+renamed chats), rebuilds the index, then summarizes a ~100-session sample, prices its tokens at DeepSeek's list
+price and projects the rest: it continues within `--budget` (or when you confirm), else stops with the command
+to resume (`--from summaries`). New and changed chunks are embedded on OpenRouter, the inbox picks up new
+promises, and the graph keeps every existing node where it was. Restart the API afterwards. Supports
+Instagram/Facebook zips and WhatsApp `msgstore.db`; other platforms use the steps below.
+
+By hand: put the new export next to the old one in `archive/` (keep the old one) and rerun the same steps. Parsers only
 add: messages already stored are skipped (Instagram/Facebook ones are matched by chat, time and text, since
-their ids change between exports), and messages that only the old export still has are kept. Accounts keep
+their ids change between exports; a chat whose folder was renamed is matched by its number, and Meta's rewording
+of its own notices is ignored), and messages that only the old export still has are kept. Accounts keep
 their `account_id` across rebuilds (recorded in `user_notes.db`, table `AccountIds`) and people live there too,
 so notes, people and the graph stay attached to the right accounts. Unchanged conversations keep their session and chunk ids, so
 `summarize_sessions.py` only pays for new ones, and until the new chunks are embedded search finds them by

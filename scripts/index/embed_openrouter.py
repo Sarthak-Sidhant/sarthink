@@ -4,7 +4,8 @@
 Writes <out>.npy (float16) + <out>.ids.json, the format merge_embeddings.py folds into the main vector file:
     python3 scripts/index/embed_openrouter.py processed_data/index/updates/wa --platform whatsapp
     python3 scripts/index/merge_embeddings.py processed_data/index/updates/wa
---missing embeds only chunks that have no vector yet (after an import). Texts are built exactly as
+--missing embeds only chunks that have no vector yet (after an import); --tag/--chunks-file add chunks whose text
+changed (new context lines; new messages or a renamed chat). Texts are built exactly as
 build_embeddings.py builds them (documents get no instruction prefix; queries do, see search.py).
 """
 import argparse
@@ -50,7 +51,14 @@ def main(a):
     else:
         keep = set(ids)
     if a.missing:
-        keep -= set(meta["ids"])
+        stale = set()
+        if a.tag:      # sessions summarized in this update: their chunks now carry a context line
+            stale |= {r[0] for r in conn.execute(
+                "SELECT c.chunk_id FROM Chunks c JOIN SessionSummaries x ON x.session_id = c.session_id WHERE x.tag = ?",
+                (a.tag,))}
+        if a.chunks_file:    # chunks whose text changed in a rebuild (new messages, renamed chats)
+            stale |= set(json.load(open(a.chunks_file)))
+        keep = (keep - set(meta["ids"])) | (keep & stale)
     items = [(c, t) for c, t in zip(ids, texts) if c in keep]
     print(f"{len(items)} chunks to embed with {a.model} via OpenRouter")
     todo = list(batches(items))
@@ -94,6 +102,8 @@ if __name__ == "__main__":
     ap.add_argument("out", help="output prefix, e.g. processed_data/index/updates/wa")
     ap.add_argument("--platform", help="only chunks of this platform")
     ap.add_argument("--missing", action="store_true", help="only chunks without a vector in the main file")
+    ap.add_argument("--tag", help="with --missing: also chunks of sessions summarized with this tag (new context lines)")
+    ap.add_argument("--chunks-file", help="with --missing: also these chunks (JSON list of chunk ids)")
     ap.add_argument("--model", default="qwen/qwen3-embedding-8b")
     ap.add_argument("--workers", type=int, default=4)
     main(ap.parse_args())
