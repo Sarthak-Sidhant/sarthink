@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import re
 import sqlite3
+import time
 from collections import defaultdict
 
 from common import DATA_DIR, IDENTITY_MAP, TWITTER_ID_MAP, TWITTER_USERS_DB, USER_DB, connect_index
@@ -256,6 +257,42 @@ def build(conn=None, verbose=True):
         if uids:
             log(f"   AMBIGUOUS alias '{dn}' on {platform} matches {len(uids)} accounts, not assigned: user_ids={uids}")
     log(f"Same-name accounts across platforms (suggestions): {len(cands)}")
+    t0 = time.time()
+    n = build_facts(conn)
+    log(f"MessageFacts: {n} messages with their account, platform and IST day ({time.time() - t0:.0f}s)")
+
+
+# A message's IST timestamp: null tweet times are recovered from the tweet's Snowflake id.
+TS_SQL = """COALESCE(m.timestamp_utc, CASE WHEN substr(m.msg_id, 1, 8) = 'twitter_' AND substr(m.msg_id, 9) GLOB '[0-9]*'
+            THEN ((CAST(substr(m.msg_id, 9) AS INTEGER) >> 22) + 1288834974657) / 1000 END)"""
+
+
+def build_facts(conn):
+    """MessageFacts: one narrow row per message (account, platform, chat, time), precomputed so counts and
+    activity stats scan this table instead of joining every message to its account at query time (the agent's
+    `messages` view and the dossiers read it; ~3x faster). Rebuilt with the accounts, so it is never staler than
+    them; FactsMeta lets readers check it still matches src.Messages."""
+    conn.executescript(f"""
+        DROP TABLE IF EXISTS MessageFacts;
+        CREATE TABLE MessageFacts (rid INTEGER PRIMARY KEY, account_id INTEGER, is_me INTEGER, platform TEXT,
+                                   thread_id INTEGER, ts INTEGER, day TEXT);
+        INSERT INTO MessageFacts
+          SELECT m.rowid, a.account_id, a.is_me, t.platform, m.thread_id, {TS_SQL}, NULL
+          FROM src.Messages m
+          JOIN AccountUsers au ON au.user_id = m.author_id
+          LEFT JOIN AccountThreads at ON at.user_id = m.author_id AND at.thread_id = m.thread_id
+          JOIN Accounts a ON a.account_id = COALESCE(at.account_id, au.account_id)
+          JOIN src.Threads t ON t.id = m.thread_id;
+        UPDATE MessageFacts SET day = date(ts, 'unixepoch', '+330 minutes');
+        CREATE INDEX idx_facts_thread ON MessageFacts(thread_id);
+        CREATE INDEX idx_facts_account ON MessageFacts(account_id);
+        CREATE INDEX idx_facts_day ON MessageFacts(day);
+        CREATE INDEX idx_facts_me ON MessageFacts(is_me, thread_id);
+        DROP TABLE IF EXISTS FactsMeta;
+        CREATE TABLE FactsMeta AS SELECT COUNT(*) AS n, MAX(rowid) AS max_rid FROM src.Messages;
+    """)
+    conn.commit()
+    return conn.execute("SELECT COUNT(*) FROM MessageFacts").fetchone()[0]
 
 
 if __name__ == "__main__":

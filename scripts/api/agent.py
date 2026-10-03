@@ -18,6 +18,7 @@ import re
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 from dotenv import dotenv_values
 from openai import OpenAI
@@ -160,13 +161,15 @@ TOOLS = [
             "belongs to (NULL person_id if the account is in no person; then person = the account name); who_id = "
             "'P_<person_id>' or 'A_<account_id>' — group by who_id to count per human. is_me=1 for Sarthak; ts = unix "
             "seconds UTC; day = 'YYYY-MM-DD' (IST)\n"
+            "  msg_counts(account_id, account, person_id, person, who_id, is_me, platform, thread_id, ts, day)\n"
+            "    the same rows without msg_id/content/thread: several times faster — use it for counts and stats\n"
             "  accounts(account_id, name, platform, is_me, placeholder, message_count, person_id, person)  "
             "placeholder=1: one chat of a deleted/deactivated account (may carry a guessed name ending in '?')\n"
             "  people(person_id, name, accounts, message_count)  Sarthak is person_id 1\n"
             "  threads(thread_id, platform, title, is_dm)\n"
             "Example — who he talks with most in DMs:\n"
-            "  SELECT o.person, COUNT(*) n FROM messages o JOIN threads t USING(thread_id) WHERE t.is_dm=1 "
-            "AND o.is_me=0 AND o.thread_id IN (SELECT thread_id FROM messages WHERE is_me=1) "
+            "  SELECT o.person, COUNT(*) n FROM msg_counts o JOIN threads t USING(thread_id) WHERE t.is_dm=1 "
+            "AND o.is_me=0 AND o.thread_id IN (SELECT thread_id FROM msg_counts WHERE is_me=1) "
             "GROUP BY o.who_id ORDER BY n DESC LIMIT 10\n"
             f"Results are capped at {SQL_ROW_LIMIT} rows; long text is truncated. Include msg_id in the SELECT when "
             "you list individual messages: each such row then gets a citable source number [n]."),
@@ -234,6 +237,41 @@ class SqlTool:
               LEFT JOIN u.PersonAccounts pa ON pa.person_id = pe.person_id
               LEFT JOIN main.Accounts a ON a.platform = pa.platform AND a.raw_id = pa.raw_id AND a.chat = pa.chat
               GROUP BY pe.person_id;
+            CREATE TEMP VIEW threads AS
+              SELECT id AS thread_id, platform, title,
+                     CASE WHEN platform IN ('discord', 'whatsapp') OR lower(title) LIKE 'dm%'
+                               OR (platform IN ('instagram','facebook') AND lower(title) NOT LIKE 'comment on%')
+                               OR platform_thread_id LIKE '%:reddit.com%' THEN 1 ELSE 0 END AS is_dm
+              FROM src.Threads;
+        """)
+        self.facts = self._facts_fresh()
+        if self.facts:      # precomputed per-message account/platform/day (build_identity.py): ~3x faster stats
+            self.conn.executescript("""
+            CREATE TEMP VIEW msg_stats AS          -- internal: messages without the people columns (faster stats)
+              SELECT f.account_id, f.is_me, f.platform, f.thread_id, t.title AS thread, f.day
+              FROM main.MessageFacts f JOIN src.Threads t ON t.id = f.thread_id;
+            CREATE TEMP VIEW msg_counts AS         -- for the model: messages without the text, for counting
+              SELECT f.account_id, a.name AS account, pa.person_id, COALESCE(pe.name, a.name) AS person,
+                     COALESCE('P_' || pa.person_id, 'A_' || f.account_id) AS who_id, f.is_me, f.platform, f.thread_id,
+                     f.ts, f.day
+              FROM main.MessageFacts f
+              JOIN main.Accounts a ON a.account_id = f.account_id
+              LEFT JOIN u.PersonAccounts pa ON pa.platform = a.platform AND pa.raw_id = a.raw_id AND pa.chat = a.chat
+              LEFT JOIN u.People pe ON pe.person_id = pa.person_id;
+            CREATE TEMP VIEW messages AS
+              SELECT m.msg_id, f.account_id, a.name AS account, pa.person_id, COALESCE(pe.name, a.name) AS person,
+                     COALESCE('P_' || pa.person_id, 'A_' || f.account_id) AS who_id, f.is_me, f.platform, f.thread_id,
+                     t.title AS thread, f.ts, f.day, m.content
+              FROM main.MessageFacts f
+              JOIN src.Messages m ON m.rowid = f.rid
+              JOIN main.Accounts a ON a.account_id = f.account_id
+              LEFT JOIN u.PersonAccounts pa ON pa.platform = a.platform AND pa.raw_id = a.raw_id AND pa.chat = a.chat
+              LEFT JOIN u.People pe ON pe.person_id = pa.person_id
+              JOIN src.Threads t ON t.id = f.thread_id;
+            """)
+        else:               # older data folder, or messages imported without re-running build_identity.py
+            print("[sql] MessageFacts missing or stale: run scripts/index/build_identity.py for faster stats")
+            self.conn.executescript("""
             CREATE TEMP VIEW msg_stats AS          -- internal: messages without the people columns (faster stats)
               SELECT m.msg_id, a.account_id, a.is_me, t.platform, m.thread_id, t.title AS thread,
                      date(COALESCE(m.timestamp_utc, CASE WHEN substr(m.msg_id, 1, 8) = 'twitter_' AND substr(m.msg_id, 9) GLOB '[0-9]*'
@@ -244,12 +282,6 @@ class SqlTool:
               LEFT JOIN AccountThreads at ON at.user_id = m.author_id AND at.thread_id = m.thread_id
               JOIN main.Accounts a ON a.account_id = COALESCE(at.account_id, au.account_id)
               JOIN src.Threads t ON t.id = m.thread_id;
-            CREATE TEMP VIEW threads AS
-              SELECT id AS thread_id, platform, title,
-                     CASE WHEN platform IN ('discord', 'whatsapp') OR lower(title) LIKE 'dm%'
-                               OR (platform IN ('instagram','facebook') AND lower(title) NOT LIKE 'comment on%')
-                               OR platform_thread_id LIKE '%:reddit.com%' THEN 1 ELSE 0 END AS is_dm
-              FROM src.Threads;
             CREATE TEMP VIEW messages AS
               SELECT m.msg_id, a.account_id, a.name AS account, pa.person_id, COALESCE(pe.name, a.name) AS person,
                      COALESCE('P_' || pa.person_id, 'A_' || a.account_id) AS who_id, a.is_me, t.platform, m.thread_id,
@@ -267,9 +299,19 @@ class SqlTool:
               LEFT JOIN u.PersonAccounts pa ON pa.platform = a.platform AND pa.raw_id = a.raw_id AND pa.chat = a.chat
               LEFT JOIN u.People pe ON pe.person_id = pa.person_id
               JOIN src.Threads t ON t.id = m.thread_id;
+            CREATE TEMP VIEW msg_counts AS
+              SELECT account_id, account, person_id, person, who_id, is_me, platform, thread_id, ts, day FROM messages;
         """)
         self.conn.set_authorizer(self._authorize)
         self.lock = threading.Lock()
+
+    def _facts_fresh(self):
+        try:
+            got = self.conn.execute("SELECT n, max_rid FROM main.FactsMeta").fetchone()
+            now = self.conn.execute("SELECT COUNT(*), MAX(rowid) FROM src.Messages").fetchone()
+            return got is not None and tuple(got) == tuple(now)
+        except sqlite3.Error:
+            return False
 
     @staticmethod
     def _authorize(action, *args):
@@ -571,6 +613,10 @@ class Agent:
         self.thinking = thinking
         self.verify = verify
         self.verify_model = verify_model
+        # the citation check thinks only when the answer did: with thinking it catches more unsupported claims
+        # (4.6% vs 6.4% of claims left, basic eval) but takes ~5x longer (median 9s vs 2s, worst 40s vs 6s).
+        # The draft streams first, so in normal mode that wait is spent reading; Quick mode skips it.
+        self.verify_thinking = thinking
         self.sql = SqlTool()
         self.profiles = Profiles(self.sql)
         self._lock = threading.RLock()
@@ -596,6 +642,7 @@ class Agent:
         t0 = time.time()
         r = self.client.chat.completions.create(
             model=self.verify_model, response_format={"type": "json_object"}, max_tokens=16000,
+            extra_body=None if self.verify_thinking else {"thinking": {"type": "disabled"}},
             messages=[{"role": "user", "content": VERIFY.format(
                 question=question, draft=draft, sources="\n\n".join(blocks + sql))}])
         usage["in"] += r.usage.prompt_tokens
@@ -812,8 +859,11 @@ class Agent:
         if name == "run_sql" and "rows" in res:
             entry["result"] = {"columns": res["columns"], "rows": res["rows"][:40]}
         if name == "person_overview" and "error" not in res:
-            entry["result"] = {k: v for k, v in res.items() if k != "themes"} | {
-                "themes": [{k: t[k] for k in ("theme", "description", "sessions")} for t in res.get("themes", [])]}
+            brief = lambda ts: [{k: t[k] for k in ("theme", "where_when", "sessions")} for t in ts]  # noqa: E731
+            entry["result"] = {k: v for k, v in res.items() if k not in ("themes", "by_account")} | {
+                "themes": brief(res.get("themes", []))} | ({"by_account": [
+                    {k: v for k, v in a.items() if k != "themes"} | {"themes": brief(a["themes"])}
+                    for a in res["by_account"]]} if "by_account" in res else {})
         trace.append(entry)
         if isinstance(trace, Trace):
             self._attach_notes(name, args, res, trace)
@@ -827,21 +877,56 @@ class Agent:
         return json.dumps(res, ensure_ascii=False)
 
     # ---- loop --------------------------------------------------------------------------------
+    def _chat(self, trace, live, **kw):
+        """One model call. live=True (the main agent with a streaming UI): stream it, sending answer text to the UI
+        as it is written ({"type": "delta"}); if the reply turns out to be tool calls after some text, the UI is
+        told to drop that text ({"type": "reset"}). Returns (message, usage) shaped like a non-streamed reply."""
+        if not live:
+            r = self.client.chat.completions.create(**kw)
+            return r.choices[0].message, r.usage
+        content, reasoning, calls, usage, shown = [], [], {}, None, False
+        for ch in self.client.chat.completions.create(stream=True, stream_options={"include_usage": True}, **kw):
+            if ch.usage:
+                usage = ch.usage
+            if not ch.choices:
+                continue
+            d = ch.choices[0].delta
+            if getattr(d, "reasoning_content", None):
+                reasoning.append(d.reasoning_content)
+            for tc in d.tool_calls or []:
+                c = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                c["id"] = tc.id or c["id"]
+                if tc.function:
+                    c["name"] += tc.function.name or ""
+                    c["args"] += tc.function.arguments or ""
+            if d.content:
+                content.append(d.content)
+                if not calls:
+                    trace.emit(type="delta", text=d.content)
+                    shown = True
+        if shown and calls:
+            trace.emit(type="reset")
+        fn = lambda c: SimpleNamespace(name=c["name"], arguments=c["args"])  # noqa: E731
+        msg = SimpleNamespace(content="".join(content), reasoning_content="".join(reasoning) or None,
+                              tool_calls=[SimpleNamespace(id=c["id"], function=fn(c)) for _, c in sorted(calls.items())]
+                              or None)
+        return msg, usage
+
     def _loop(self, messages, sources, trace, usage, max_steps=MAX_STEPS, label=None, model=None):
         """Tool-calling loop; returns the model's final text."""
         extra = None if self.thinking else {"thinking": {"type": "disabled"}}
+        live = label is None and isinstance(trace, Trace) and trace.emit_fn is not None
         for step in range(max_steps + 1):
             final_round = step == max_steps
             if final_round:
                 messages.append({"role": "user", "content": FINAL_NUDGE})
-            r = self.client.chat.completions.create(
-                model=model or self.model, messages=messages, tools=TOOLS, extra_body=extra, max_tokens=8000,
-                tool_choice="none" if final_round else "auto")
+            m, u = self._chat(trace, live,
+                              model=model or self.model, messages=messages, tools=TOOLS, extra_body=extra,
+                              max_tokens=8000, tool_choice="none" if final_round else "auto")
             with self._lock:
-                usage["in"] += r.usage.prompt_tokens
-                usage["out"] += r.usage.completion_tokens
-                usage["cached"] = usage.get("cached", 0) + (getattr(r.usage, "prompt_cache_hit_tokens", 0) or 0)
-            m = r.choices[0].message
+                usage["in"] += u.prompt_tokens if u else 0
+                usage["out"] += u.completion_tokens if u else 0
+                usage["cached"] = usage.get("cached", 0) + (getattr(u, "prompt_cache_hit_tokens", 0) or 0)
             msg = {"role": "assistant", "content": m.content or ""}
             rc = getattr(m, "reasoning_content", None)
             if rc:
@@ -861,6 +946,7 @@ class Agent:
                 continue
             text = m.content or ""
             if final_round and TOOLCALL_TEXT.search(text):   # model wrote a tool call as text: ask once more
+                trace.emit(type="reset")
                 messages.append({"role": "assistant", "content": text})
                 messages.append({"role": "user", "content": FINAL_NUDGE + " Plain prose only."})
                 r = self.client.chat.completions.create(
@@ -945,6 +1031,7 @@ class Agent:
 
         draft, changes = answer, []
         if self.verify:
+            trace.emit(type="checking")          # the streamed draft stays readable while it is checked
             trace.emit(type="step", text="✅ Double-checking every citation", nodes=[])
             answer, changes = self._verify(question, draft, sources, trace, usage)
 

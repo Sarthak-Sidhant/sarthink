@@ -122,9 +122,9 @@ Return JSON:
   "notes": "one line"}}"""
 
 
-def post(api, q, verify=False, multi=True, timeout=900):
-    req = urllib.request.Request(f"{api}/api/ask", data=json.dumps({"question": q, "verify": verify,
-                                                                    "multi": multi}).encode(),
+def post(api, q, verify=False, multi=True, timeout=900, model="deepseek-v4-pro", thinking=True):
+    req = urllib.request.Request(f"{api}/api/ask", data=json.dumps({"question": q, "verify": verify, "multi": multi,
+                                                                    "model": model, "thinking": thinking}).encode(),
                                  headers={"content-type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
@@ -167,7 +167,7 @@ def main(a):
     def run(case):
         t0 = time.time()
         try:
-            res = post(a.api, case[2], verify=a.verify, multi=a.multi)
+            res = post(a.api, case[2], verify=a.verify, multi=a.multi, model=a.model, thinking=not a.no_thinking)
         except Exception as e:
             return case, None, {"error": str(e)}, time.time() - t0
         try:
@@ -194,6 +194,7 @@ def main(a):
                    "pii_leak": bool(j.get("pii_leak")), "id": cid, "type": typ, "correct": correct, "unsupported": len(unsup), "claims": j.get("claims_checked"),
                    "abstain_ok": abstain_ok, "invalid_cites": len(res["invalid_citations"]),
                    "sources": len(res["sources"]), "tools": len(res["steps"]), "seconds": res["seconds"],
+                   "verify_seconds": sum(x["ms"] for x in res["steps"] if x["tool"] == "verify") / 1000,
                    "tokens_in": res["tokens"]["in"], "tokens_cached": res["tokens"].get("cached", 0), "unsupported_claims": unsup, "notes": j.get("notes"),
                    "answer": res["answer"], "question": q}
             rows.append(row)
@@ -214,6 +215,7 @@ def main(a):
         "cited_the_right_conversation": (lambda xs: f"{sum(xs)}/{len(xs)}" if xs else None)(
             [r["found_session"] for r in ok if r.get("found_session") is not None]),
         "median_seconds": sorted(r["seconds"] for r in ok)[len(ok) // 2] if ok else None,
+        "median_verify_seconds": sorted(r.get("verify_seconds", 0) for r in ok)[len(ok) // 2] if ok else None,
         "mean_tokens_in": int(sum(r["tokens_in"] for r in ok) / max(len(ok), 1)),
         "cache_hit_share": round(sum(r.get("tokens_cached", 0) for r in ok) / max(sum(r["tokens_in"] for r in ok), 1), 2),
     }
@@ -229,6 +231,8 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="baseline")
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--model", default="deepseek-v4-pro", help="answering model")
+    ap.add_argument("--no-thinking", action="store_true", help="answer without the model's thinking phase")
     ap.add_argument("--set", choices=["basic", "hard", "temporal", "v2", "all"], default="basic")
     ap.add_argument("--multi", action="store_true", help="enable the planner / multi-agent 'deep research' path")
     main(ap.parse_args())

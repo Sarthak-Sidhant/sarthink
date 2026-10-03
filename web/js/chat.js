@@ -24,6 +24,13 @@ export class Chat {
     $('new-chat').addEventListener('click', () => this.reset());
     this.log.addEventListener('click', e => this.onLogClick(e));
     $('sources-body').addEventListener('click', e => this.onSourcesClick(e));
+    // Quick (no thinking) and Deep research pull opposite ways: one at a time. Quick is remembered.
+    try { $('quick').checked = localStorage.getItem('sarthink.quick') === '1'; } catch { /* storage blocked */ }
+    $('quick').addEventListener('change', () => {
+      if ($('quick').checked) $('deep').checked = false;
+      try { localStorage.setItem('sarthink.quick', $('quick').checked ? '1' : '0'); } catch { /* storage blocked */ }
+    });
+    $('deep').addEventListener('change', () => { if ($('deep').checked) $('quick').checked = false; });
     this.restore();
     this.updateSend();
   }
@@ -54,7 +61,7 @@ export class Chat {
     try {
       const r = await fetch('/api/ask_stream', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ question: q, history, multi: $('deep').checked }),
+        body: JSON.stringify({ question: q, history, multi: $('deep').checked, thinking: !$('quick').checked }),
       });
       if (!r.ok || !r.body) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
       const reader = r.body.getReader(), dec = new TextDecoder();
@@ -75,6 +82,13 @@ export class Chat {
             turn.nodes = [...seen];
             if (seen.size) this.stage.highlight([...seen], { fly: false });   // the map lights up as it reads
             this.paintProgress(turn);
+          } else if (ev.type === 'delta') {             // the answer, as it is written
+            turn.draft = (turn.draft || '') + ev.text;
+            this.paintSoon(turn);
+          } else if (ev.type === 'reset') {             // that text was a preamble to more lookups
+            turn.draft = ''; this.paintProgress(turn);
+          } else if (ev.type === 'checking') {
+            turn.checking = true; this.paintSoon(turn);
           } else if (ev.type === 'answer') turn.data = ev.data;
           else if (ev.type === 'error') throw new Error(ev.message);
         }
@@ -101,8 +115,20 @@ export class Chat {
     return el;
   }
 
+  // repaint the streamed draft at most once per frame
+  paintSoon(turn) {
+    if (turn.paintQueued) return;
+    turn.paintQueued = true;
+    requestAnimationFrame(() => { turn.paintQueued = false; this.paintProgress(turn); this.scroll(); });
+  }
+
   paintProgress(turn, el = turn.el) {
     if (turn.data || turn.error || !el) return;
+    if (turn.draft) {
+      el.querySelector('.a').innerHTML = `<div class="a-body streaming">${markdown(turn.draft)}</div>
+        <div class="elapsed"><span class="dots"><i></i><i></i><i></i></span> ${turn.checking ? 'Checking every citation…' : 'Writing…'}</div>`;
+      return;
+    }
     const s = Math.round((Date.now() - turn.t0) / 1000);
     const last = turn.steps.slice(-4);
     el.querySelector('.a').innerHTML = `<div class="progress">
@@ -116,7 +142,7 @@ export class Chat {
     const nSrc = (d.sources || []).length;
     a.innerHTML = `<div class="a-body">${markdown(d.answer)}</div>
       ${numbersHtml(d.steps)}
-      ${turn.steps.length ? `<details class="trace"><summary>${lookups} lookups · ${d.seconds}s${d.mode === 'multi' ? ' · deep research' : ''}</summary><ol>${turn.steps.map(t => `<li>${esc(t)}</li>`).join('')}</ol></details>` : ''}
+      ${turn.steps.length ? `<details class="trace"><summary>${lookups} lookups · ${d.seconds}s${d.mode === 'multi' ? ' · deep research' : ''}${d.thinking === false ? ' · quick' : ''}</summary><ol>${turn.steps.map(t => `<li>${esc(t)}</li>`).join('')}</ol></details>` : ''}
       <div class="a-meta">
         <button class="explore" data-explore title="Open this answer's graph full screen">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="8" r="2.2"/><circle cx="10" cy="18" r="2.2"/><path d="M8 7l8 1M7 8l2 8M17 10l-6 7"/></svg>
