@@ -128,7 +128,7 @@ export function specFromPerson(d, graph) {
   for (const g of groups) {
     g.themes.slice(0, accts.length ? 4 : 6).forEach((t, k) => {
       const tid = `TH_${g.node}_${k}`;
-      nodes.push({ id: tid, kind: 'theme', label: t.theme, title: t.description, size: t.sessions });
+      nodes.push({ id: tid, kind: 'theme', platform: g.platform, label: t.theme, title: t.description, size: t.sessions });
       links.push([g.node, tid]);
       for (const e of t.examples.slice(-perTheme)) {
         const sid = `S_${e.session_id}`;
@@ -172,20 +172,27 @@ function tex(kind, color, dark) {
       const a = -Math.PI / 2 + k * Math.PI * 2 / cols.length;
       g.beginPath(); g.arc(m, m, R - w / 2, a + gap / 2, a + Math.PI * 2 / cols.length - gap / 2); g.strokeStyle = col; g.stroke();
     });
+  } else if (kind === 'theme') {   // a topic: a soft tint of its account's colour, a hairline rim and a cluster
+    const R = 50, bg = dark ? '#1d2539' : '#ffffff';  // of three dots (many conversations on one subject)
+    g.shadowColor = 'rgba(30,45,90,.22)'; g.shadowBlur = 9; g.shadowOffsetY = 2;
+    g.beginPath(); g.arc(m, m, R, 0, Math.PI * 2); g.fillStyle = mix(color, bg, dark ? 0.78 : 0.86); g.fill();
+    g.shadowColor = 'transparent';
+    g.lineWidth = 4; g.strokeStyle = mix(color, bg, 0.35); g.stroke();
+    g.fillStyle = color;
+    for (const [dx, dy, r] of [[0, -13, 10], [-13, 10, 10], [13, 10, 10]]) {
+      g.beginPath(); g.arc(m + dx, m + dy, r, 0, Math.PI * 2); g.fill();
+    }
   } else if (kind === 'glow') {
     const r = g.createRadialGradient(m, m, 0, m, m, m);
     r.addColorStop(0, color); r.addColorStop(1, 'rgba(255,255,255,0)');
     g.globalAlpha = 0.55; g.fillStyle = r; g.fillRect(0, 0, S, S);
-  } else if (kind === 'me' || kind === 'person' || kind === 'theme') {
+  } else if (kind === 'me' || kind === 'person') {
     const R = 52;
     g.shadowColor = 'rgba(30,45,90,.28)'; g.shadowBlur = 10; g.shadowOffsetY = 3;
     let fill;
     if (kind === 'me') {
       fill = g.createLinearGradient(m - R, m - R, m + R, m + R);
       fill.addColorStop(0, '#4aa8f0'); fill.addColorStop(0.5, '#9a8cf0'); fill.addColorStop(1, '#ee7fb6');
-    } else if (kind === 'theme') {
-      fill = g.createLinearGradient(m - R, m - R, m + R, m + R);
-      fill.addColorStop(0, '#9a8cf0'); fill.addColorStop(1, '#ee7fb6');
     } else {
       fill = g.createRadialGradient(m - R * 0.35, m - R * 0.4, R * 0.1, m, m, R);
       fill.addColorStop(0, mix(color, '#ffffff', 0.45)); fill.addColorStop(0.55, color); fill.addColorStop(1, mix(color, '#101828', 0.28));
@@ -280,7 +287,7 @@ export class Focus3D {
     this.spec = spec; this.focusId = null;
     const dark = document.documentElement.dataset.theme === 'dark';
     const plat = { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5'), whatsapp: css('--series-6') };
-    const colorOf = n => n.kind === 'me' ? '#9a8cf0' : n.kind === 'theme' ? '#c48ae6' : n.ref?.startsWith('P_') ? css('--person') : plat[n.platform] || css('--accent');
+    const colorOf = n => n.kind === 'me' ? '#9a8cf0' : n.kind === 'theme' ? plat[n.platform] || css('--text-2') : n.ref?.startsWith('P_') ? css('--person') : plat[n.platform] || css('--accent');
     const nodes = spec.nodes.map((n, k) => ({ ...n, k, color: colorOf(n) }));
     this.nodes = nodes; this.byId = new Map(nodes.map(n => [n.id, n]));
     const links = spec.links.map(([a, b, o]) => [this.byId.get(a), this.byId.get(b), o?.faint]).filter(([a, b]) => a && b);
