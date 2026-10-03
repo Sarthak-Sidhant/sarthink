@@ -511,7 +511,8 @@ def _build_dossier(sc):
 
 # ─── Accounts and people (docs/accounts-and-people.md) ──────────────────────────────────────────────────
 def _suggestions_for(aid, names, members, person_of):
-    """People/accounts that may be the same human as this account: same normalised name on another platform.
+    """People/accounts that may be the same human as this account: same normalised name on another platform, or a
+    second account on the same one.
     Pairs the user turned down, and accounts already in the same person, are left out."""
     mine = person_of.get(aid)
     out, seen = [], set()
@@ -525,7 +526,9 @@ def _suggestions_for(aid, names, members, person_of):
             seen.add(o)
             if PEOPLE.rejected([ACCOUNTS[aid]["key"]], [ACCOUNTS[o]["key"]]):
                 continue
-            out.append({**account_row(o, person_of, names), "why": "same name on another platform"})
+            same = ACCOUNTS[o]["platform"] == ACCOUNTS[aid]["platform"]
+            out.append({**account_row(o, person_of, names),
+                        "why": "same name, another account on this platform" if same else "same name on another platform"})
     return out
 
 
@@ -677,7 +680,7 @@ def people_delete(pid: int):
 @app.get("/api/suggestions")
 @locked
 def suggestions(limit: int = Query(60, le=500)):
-    """Same-name accounts on different platforms that are not yet in the same person, biggest first."""
+    """Same-name accounts (on different platforms, or two on one) that are not yet in the same person, biggest first."""
     names, members, person_of = people_index()
     out, seen = [], set()
     for (ids,) in S.conn.execute("SELECT account_ids FROM MergeCandidates"):

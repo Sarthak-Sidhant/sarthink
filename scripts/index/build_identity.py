@@ -100,6 +100,9 @@ def display_name_for(platform, raw_id, display_name, tw_names):
     return dn or raw_id or "unknown"
 
 
+# labels made up for accounts without a name: they match each other without being the same person
+GENERIC_LABEL = re.compile(r"^(\+\d|twitter_user_\d+$|WhatsApp user\b|Instagram user\b|Facebook user\b|unknown$)", re.I)
+
 PLACEHOLDER_NAMES = {"instagram user", "deleted user", "facebook user"}
 
 
@@ -119,20 +122,21 @@ def fold_group_names(users, me_ids):
     """{group-chat user id: DM user id} for Instagram/Facebook. Meta's exports give a person's numeric id only in a
     1:1 chat (the folder <username>_<number>); in group chats people are bare names, stored as <platform>_user_<name>.
     So one human shows up as two accounts. A group-chat name that matches exactly one DM contact's name on the
-    same platform is the same account and is written as it; names shared by several DM contacts stay apart."""
+    same platform (ignoring case) is the same account and is written as it; names shared by several DM contacts
+    stay apart (and are offered as "same person?" suggestions instead)."""
     numeric, named = defaultdict(list), []
     for u in users:
         if u["id"] in me_ids or u["platform"] not in ("instagram", "facebook") or is_placeholder(u):
             continue
-        rid, dn = str(u["raw_id"] or ""), (u["display_name"] or "").strip()
+        rid, dn = str(u["raw_id"] or ""), (u["display_name"] or "").strip().casefold()   # "tejush das" = "Tejush Das"
         if not dn:
             continue
         if rid.startswith(f"{u['platform']}_user_"):
             named.append(u)
         elif re.fullmatch(rf"{u['platform']}_\d+", rid):
             numeric[(u["platform"], dn)].append(u["id"])
-    return {u["id"]: numeric[(u["platform"], u["display_name"].strip())][0] for u in named
-            if len(numeric.get((u["platform"], u["display_name"].strip()), [])) == 1}
+    key = lambda u: (u["platform"], u["display_name"].strip().casefold())  # noqa: E731
+    return {u["id"]: numeric[key(u)][0] for u in named if len(numeric.get(key(u), [])) == 1}
 
 
 def move_account_refs(conn, store, old_aid, new_aid, old_key, new_key):
@@ -263,7 +267,7 @@ def build(conn=None, verbose=True):
             store.attach(ME, (u["platform"], str(u["raw_id"]), ""), commit=False)   # the owner holds their accounts
             continue
         norm = re.sub(r"[^a-z0-9]", "", name.lower().lstrip("@").removeprefix("u/"))
-        if len(norm) >= 4:
+        if len(norm) >= 4 and not GENERIC_LABEL.match(name):
             by_norm[norm].append((aid, u["platform"]))
 
     by_user = {u["id"]: u for u in users}
@@ -292,8 +296,14 @@ def build(conn=None, verbose=True):
         UPDATE Accounts SET message_count = COALESCE((SELECT n FROM ac WHERE ac.aid = Accounts.account_id), 0);
         DROP TABLE temp.ac;
     """)
-    cands = [(n, json.dumps([a for a, _ in v]), json.dumps(sorted({p for _, p in v})))
-             for n, v in by_norm.items() if len({p for _, p in v}) > 1]
+    # same name on two accounts that wrote something: on different platforms, or twice on one (two ids, two
+    # numbers, two DM threads). More than 6 is a common name, not one person
+    wrote = {r[0] for r in conn.execute("SELECT account_id FROM Accounts WHERE message_count > 0")}
+    cands = []
+    for n, v in by_norm.items():
+        v = [(a, p) for a, p in v if a in wrote]
+        if 1 < len(v) <= 6:
+            cands.append((n, json.dumps([a for a, _ in v]), json.dumps(sorted({p for _, p in v}))))
     conn.executemany("INSERT INTO MergeCandidates VALUES (?,?,?)", cands)
     conn.commit()
     store.db.commit()
