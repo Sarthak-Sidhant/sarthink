@@ -61,6 +61,8 @@ def main(a):
         keep = (keep - set(meta["ids"])) | (keep & stale)
     items = [(c, t) for c, t in zip(ids, texts) if c in keep]
     print(f"{len(items)} chunks to embed with {a.model} via OpenRouter")
+    if not items:
+        return
     todo = list(batches(items))
     tokens, done, t0 = 0, 0, time.time()
 

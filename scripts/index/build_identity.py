@@ -115,6 +115,46 @@ def _span(t0, t1):
     return f(t0) if f(t0) == f(t1) else f"{f(t0)} – {f(t1)}"
 
 
+def fold_group_names(users, me_ids):
+    """{group-chat user id: DM user id} for Instagram/Facebook. Meta's exports give a person's numeric id only in a
+    1:1 chat (the folder <username>_<number>); in group chats people are bare names, stored as <platform>_user_<name>.
+    So one human shows up as two accounts. A group-chat name that matches exactly one DM contact's name on the
+    same platform is the same account and is written as it; names shared by several DM contacts stay apart."""
+    numeric, named = defaultdict(list), []
+    for u in users:
+        if u["id"] in me_ids or u["platform"] not in ("instagram", "facebook") or is_placeholder(u):
+            continue
+        rid, dn = str(u["raw_id"] or ""), (u["display_name"] or "").strip()
+        if not dn:
+            continue
+        if rid.startswith(f"{u['platform']}_user_"):
+            named.append(u)
+        elif re.fullmatch(rf"{u['platform']}_\d+", rid):
+            numeric[(u["platform"], dn)].append(u["id"])
+    return {u["id"]: numeric[(u["platform"], u["display_name"].strip())][0] for u in named
+            if len(numeric.get((u["platform"], u["display_name"].strip()), [])) == 1}
+
+
+def move_account_refs(conn, store, old_aid, new_aid, old_key, new_key):
+    """A folded account's person, notes and inbox items go to the account it was folded into."""
+    moved = []
+    pid = store.person_of(old_key)
+    if pid is not None:
+        store.detach(old_key)
+        if store.person_of(new_key) is None:
+            store.attach(pid, new_key, commit=False)
+        moved.append("person")
+    n = store.db.execute("UPDATE Notes SET account_id = ? WHERE account_id = ?", (new_aid, old_aid)).rowcount
+    if n:
+        moved.append(f"{n} notes")
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'Commitments'").fetchone():
+        n = conn.execute("UPDATE Commitments SET nodes = replace(nodes, ?, ?) WHERE nodes LIKE ?",
+                         (f'"A_{old_aid}"', f'"A_{new_aid}"', f'%"A_{old_aid}"%')).rowcount
+        if n:
+            moved.append(f"{n} inbox items")
+    return ", ".join(moved)
+
+
 def placeholder_name(u, t0, t1, title):
     plat = u["platform"]
     rid = str(u["raw_id"] or "").lower()
@@ -192,11 +232,14 @@ def build(conn=None, verbose=True):
         else:
             ambiguous.append((platform, dn, [i for i in uids if i not in strong]))
 
+    folded = fold_group_names(users, me_ids)
     guesses = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, name FROM PersonNameGuesses")}
     accounts, user_rows, thread_rows = [], [], []
     by_norm = defaultdict(list)
     for u in users:
         name = display_name_for(u["platform"], u["raw_id"], u["display_name"], tw_names)
+        if u["id"] in folded:
+            continue                     # written as their DM account (fold_group_names), added below
         if u["id"] not in me_ids and is_placeholder(u):
             # one account per chat; the user row points at the first one, chats override (AccountThreads)
             chats = conn.execute("""SELECT m.thread_id, MIN(m.timestamp_utc), MAX(m.timestamp_utc), t.title,
@@ -222,6 +265,17 @@ def build(conn=None, verbose=True):
         norm = re.sub(r"[^a-z0-9]", "", name.lower().lstrip("@").removeprefix("u/"))
         if len(norm) >= 4:
             by_norm[norm].append((aid, u["platform"]))
+
+    by_user = {u["id"]: u for u in users}
+    for uid, target in folded.items():
+        u, t = by_user[uid], by_user[target]
+        aid = ids.assign(t["platform"], t["raw_id"])
+        user_rows.append((uid, aid, u["platform"], display_name_for(t["platform"], t["raw_id"], t["display_name"], tw_names)))
+        moved = move_account_refs(conn, store, ids.assign(u["platform"], u["raw_id"]), aid,
+                                  (u["platform"], str(u["raw_id"]), ""), (t["platform"], str(t["raw_id"]), ""))
+        if moved:
+            log(f"   folded {u['platform']} '{u['display_name']}': {moved} moved to their DM account")
+    log(f"Group-chat names folded into the matching DM account: {len(folded)}")
 
     conn.executemany("INSERT INTO Accounts(account_id, name, platform, is_me, placeholder, raw_id, chat) "
                      "VALUES (?,?,?,?,?,?,?)", accounts)

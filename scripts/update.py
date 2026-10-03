@@ -208,6 +208,9 @@ def stage_summaries(a):
     run("scripts/index/summarize_sessions.py", "--limit", min(SAMPLE, n), "--sample", "--tag", a.tag, *off)
     tin, tout, conv, cost = spent(a.tag, a.offpeak)
     n2, tokens2 = pending()
+    if n2 == n:                     # none of the sample went through: DeepSeek refuses these (content filter)
+        say(f"DeepSeek declined all {n:,}; they stay unsummarized (search still finds them)")
+        return True
     est = cost / conv * tokens2 if conv else None
     say(f"So far under {a.tag}: {tin:,} tokens in, {tout:,} out ≈ ${cost:.2f}. The other {n2:,} sessions: "
         + (f"about ${est:.2f}" if est is not None else "cost unknown")
@@ -245,7 +248,8 @@ def stage_embeddings(a):
         json.dump(changed, open(f, "w"))
         extra = ["--chunks-file", f]
     run("scripts/index/embed_openrouter.py", out, "--missing", "--tag", a.tag, *extra)
-    run("scripts/index/merge_embeddings.py", out)
+    if Path(f"{out}.npy").exists():
+        run("scripts/index/merge_embeddings.py", out)
 
 
 def stage_inbox(a):
