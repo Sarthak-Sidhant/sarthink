@@ -20,6 +20,12 @@ const chatName = (label, platform) => /^tweet thread \d+/i.test(label || '') ? '
   : /^reddit (thread|post) /i.test(label || '') ? 'Reddit thread' : (label || platformLabel(platform));
 
 // ─── builders: turn app data into a scene spec {nodes, links} ──────────────────
+// a WhatsApp contact is labelled by their phone number, with the name underneath
+// a person (P_) is drawn as a light hub ringed in the colours of the platforms their accounts are on
+const ringOf = (graph, id) => String(id).startsWith('P_')
+  ? [...new Set((graph.infoById(id)?.accounts || []).map(a => graph.infoById(a)?.platform).filter(Boolean))] : null;
+const named = (info, name) => info?.phone ? { label: info.phone, sub: cleanName(name || info.label || '') }
+  : { label: cleanName(name || info?.label || '?') };
 // who to show for a set of node ids: people (P_), and accounts (A_) that belong to no person in the set;
 // never me or my own accounts (I'm the centre of every scene)
 function whoIn(ids, graph, meId) {
@@ -52,7 +58,7 @@ export function specFromSources(sources, graph) {
     }
     for (const p of people) {
       const info = graph.infoById(p);
-      add(p, { kind: 'person', platform: info?.platform || s.platform, label: cleanName(info?.label || '?'), size: info?.size, ref: p });
+      add(p, { kind: 'person', platform: info?.platform || s.platform, ...named(info), size: info?.size, ref: p, ring: ringOf(graph, p) });
       if (chats.length) chats.forEach(t => links.push([t, p])); else links.push([p, sid]);
       links.push([meId, p]);
     }
@@ -68,7 +74,7 @@ export function specFromNodes(ids, graph) {
   for (const p of people) {
     const info = graph.infoById(p);
     if (!info) continue;
-    nodes.push({ id: p, kind: 'person', platform: info.platform, label: cleanName(info.label), size: info.size, ref: p });
+    nodes.push({ id: p, kind: 'person', platform: info.platform, ...named(info), size: info.size, ref: p, ring: ringOf(graph, p) });
     links.push([meId, p]);
   }
   const has = new Set(nodes.map(n => n.id));
@@ -100,12 +106,13 @@ export function specFromPerson(d, graph) {
   const meId = graph.meId, pid = d.node, info = graph.infoById(pid);
   const nodes = [
     { id: meId, kind: 'me', label: 'You' },
-    { id: pid, kind: 'person', platform: info?.platform, label: cleanName(d.name), size: d.messages_total, ref: d.node },
+    { id: pid, kind: 'person', platform: info?.platform, label: cleanName(d.name), size: d.messages_total, ref: d.node,
+      ring: d.account_themes ? [...new Set(d.account_themes.map(a => a.platform))] : ringOf(graph, pid) },
   ];
   const links = [[meId, pid]], has = id => nodes.some(n => n.id === id);
   const accts = (d.account_themes || []).filter(a => a.messages_total);
   for (const a of accts) {
-    nodes.push({ id: a.node, kind: 'person', platform: a.platform, label: cleanName(a.name), size: a.messages_total, ref: a.node });
+    nodes.push({ id: a.node, kind: 'person', platform: a.platform, ...named(graph.infoById(a.node), a.name), size: a.messages_total, ref: a.node });
     links.push([pid, a.node]);
   }
   const ownerOf = chat => accts.find(a => graph.neighbours(chat).includes(a.node))?.node || pid;
@@ -156,7 +163,16 @@ function tex(kind, color, dark) {
   if (texCache.has(key)) return texCache.get(key);
   const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
   const g = c.getContext('2d'), m = S / 2, rim = dark ? 'rgba(255,255,255,.85)' : '#ffffff';
-  if (kind === 'glow') {
+  if (kind === 'hub') {          // color: the ring's colours, comma-separated; one equal arc each
+    const R = 50, w = 15, cols = color.split(','), gap = cols.length > 1 ? 0.14 : 0;
+    g.shadowColor = 'rgba(30,45,90,.28)'; g.shadowBlur = 10; g.shadowOffsetY = 3;
+    g.beginPath(); g.arc(m, m, R, 0, Math.PI * 2); g.fillStyle = dark ? '#1d2539' : '#ffffff'; g.fill();
+    g.shadowColor = 'transparent'; g.lineWidth = w;
+    cols.forEach((col, k) => {
+      const a = -Math.PI / 2 + k * Math.PI * 2 / cols.length;
+      g.beginPath(); g.arc(m, m, R - w / 2, a + gap / 2, a + Math.PI * 2 / cols.length - gap / 2); g.strokeStyle = col; g.stroke();
+    });
+  } else if (kind === 'glow') {
     const r = g.createRadialGradient(m, m, 0, m, m, m);
     r.addColorStop(0, color); r.addColorStop(1, 'rgba(255,255,255,0)');
     g.globalAlpha = 0.55; g.fillStyle = r; g.fillRect(0, 0, S, S);
@@ -291,15 +307,17 @@ export class Focus3D {
       n.base = sz;
       const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex('glow', n.color, dark), depthWrite: false, transparent: true, opacity: 0.0 }));
       glow.scale.setScalar(sz * 3.2); glow.renderOrder = 1;
-      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex(n.kind, n.color, dark), depthWrite: false, transparent: true }));
+      const map = n.ring?.length ? tex('hub', n.ring.map(p => plat[p] || n.color).join(','), dark) : tex(n.kind, n.color, dark);
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthWrite: false, transparent: true }));
       sp.scale.setScalar(0.001); sp.renderOrder = 3; sp.userData.node = n;
       this.group.add(glow, sp);
       n.sprite = sp; n.glow = glow; n.pos = new THREE.Vector3();
       const lab = document.createElement('div');
-      lab.className = `f3-label k-${n.kind}`;
+      lab.className = `f3-label k-${n.kind}${n.sub ? ' two' : ''}`;
       lab.innerHTML = n.kind === 'session'
         ? `<i style="background:${n.color}"></i>${esc(n.label || '')}`
-        : esc(String(n.label || '').length > 30 ? String(n.label).slice(0, 29) + '…' : n.label || '');
+        : esc(String(n.label || '').length > 30 ? String(n.label).slice(0, 29) + '…' : n.label || '') +
+          (n.sub ? `<small>${esc(n.sub.length > 30 ? n.sub.slice(0, 29) + '…' : n.sub)}</small>` : '');
       this.labels.append(lab); n.lab = lab;
     }
 
@@ -496,7 +514,7 @@ export class Focus3D {
         this.tip.innerHTML = n.kind === 'session'
           ? `<b>${esc(n.title || 'Conversation')}</b><span>${esc(platformLabel(n.platform))} · ${esc(fullDate(n.date))}${n.n != null ? ` · source ${n.n}` : ''}</span>${n.snippet ? `<p>${esc(n.snippet.slice(0, 220))}${n.snippet.length > 220 ? '…' : ''}</p>` : ''}<em>Click to read</em>`
           : n.kind === 'theme' ? `<b>${esc(n.label)}</b><span>${n.size} conversations</span>${n.title ? `<p>${esc(n.title)}</p>` : ''}`
-            : `<b>${esc(n.label)}</b><span>${esc(platformLabel(n.platform))}${n.size ? ` · ${Number(n.size).toLocaleString()} messages` : ''}</span>${n.kind === 'person' ? '<em>Click for profile</em>' : ''}`;
+            : `<b>${esc(n.label)}</b><span>${n.sub ? `${esc(n.sub)} · ` : ''}${esc(platformLabel(n.platform))}${n.size ? ` · ${Number(n.size).toLocaleString()} messages` : ''}</span>${n.kind === 'person' ? '<em>Click for profile</em>' : ''}`;
         this.tip.hidden = false;
         const x = e.clientX - r.left, y = e.clientY - r.top;
         this.tip.style.left = Math.min(r.width - this.tip.offsetWidth - 8, x + 14) + 'px';

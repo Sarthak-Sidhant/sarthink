@@ -71,13 +71,40 @@ def clean(s, n=None):
     return (s[:n] + "...") if n and len(s) > n else s
 
 
+# country calling codes seen in WhatsApp exports (longest match wins); others fall back to "+<digits>"
+CALLING_CODES = {"1", "7", "20", "27", "30", "31", "32", "33", "34", "39", "41", "43", "44", "45", "46", "47", "49",
+                 "52", "55", "60", "61", "62", "63", "64", "65", "66", "81", "82", "84", "86", "90", "91", "92", "93",
+                 "94", "95", "98", "212", "234", "254", "351", "353", "880", "960", "961", "962", "963", "964", "965",
+                 "966", "967", "968", "970", "971", "972", "973", "974", "975", "977"}
+
+
+def format_phone(raw_id):
+    """A WhatsApp account id (country code + number, digits only) as a readable phone number: +91 82407 81962.
+    Hidden-number contacts ('lid:…') and anything that isn't a plain number give ''."""
+    d = str(raw_id or "")
+    if not d.isdigit() or not 8 <= len(d) <= 15:
+        return ""
+    cc = next((d[:k] for k in (3, 2, 1) if d[:k] in CALLING_CODES), "")
+    rest = d[len(cc):]
+    if cc == "91" and len(rest) == 10:
+        rest = f"{rest[:5]} {rest[5:]}"
+    elif cc == "1" and len(rest) == 10:
+        rest = f"{rest[:3]} {rest[3:6]} {rest[6:]}"
+    elif len(rest) == 8:
+        rest = f"{rest[:4]} {rest[4:]}"                                             # +65 9123 4567
+    else:
+        rest = " ".join(x for x in (rest[:-6], rest[-6:-3], rest[-3:]) if x)       # +44 7700 900 123
+    return f"+{cc} {rest}" if cc else f"+{d}"
+
+
 def export(conn=None, keep_layout=False):
     """Account (A_) and thread (T_) nodes, account->thread edges. People are not in these files: the API serves
     them and the viewer draws them linked to their accounts, so linking never rewrites the graph."""
     conn = conn or connect_index()
     account_of = {r[0]: r[1] for r in conn.execute("SELECT user_id, account_id FROM AccountUsers")}
     per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, account_id FROM AccountThreads")}
-    accounts = {r["account_id"]: dict(r) for r in conn.execute("SELECT account_id, name, platform, is_me FROM Accounts")}
+    accounts = {r["account_id"]: dict(r) for r in conn.execute(
+        "SELECT account_id, name, platform, is_me, raw_id FROM Accounts")}
 
     weights = defaultdict(int)          # (account, thread) -> messages
     for author_id, thread_id, n in conn.execute(
@@ -100,15 +127,16 @@ def export(conn=None, keep_layout=False):
             plat = a["platform"].capitalize().replace("Whatsapp", "WhatsApp")
             label = f"Me on {plat}" + ("" if "(me)" in a["name"] else f" ({a['name']})")
         color = GROUP_COLORS["me"] if a["is_me"] else GROUP_COLORS.get(group, "#aaaaaa")
-        nodes.append((f"A_{aid}", clean(label), group, size[f"A_{aid}"], color))
+        phone = format_phone(a["raw_id"]) if a["platform"] == "whatsapp" and not a["is_me"] else ""
+        nodes.append((f"A_{aid}", clean(label), group, size[f"A_{aid}"], color, phone))
 
     # identical labels for different accounts (e.g. many deleted accounts) get #2, #3… in the graph only
     seen = defaultdict(int)
     for i in sorted(range(len(nodes)), key=lambda i: -nodes[i][3]):     # biggest keeps the plain label
-        nid, label, group, weight, color = nodes[i]
+        nid, label, group, weight, color, phone = nodes[i]
         seen[label] += 1
         if seen[label] > 1:
-            nodes[i] = (nid, f"{label} #{seen[label]}", group, weight, color)
+            nodes[i] = (nid, f"{label} #{seen[label]}", group, weight, color, phone)
 
     thread_ids = {t for _, t in weights}
     for r in conn.execute("SELECT id, platform, title, platform_thread_id FROM src.Threads"):
@@ -116,11 +144,11 @@ def export(conn=None, keep_layout=False):
             continue
         group = thread_group(r["platform"], r["title"], r["platform_thread_id"])
         nodes.append((f"T_{r['id']}", clean(r["title"], 45) or "Untitled", group, size[f"T_{r['id']}"],
-                      GROUP_COLORS.get(group, "#aaaaaa")))
+                      GROUP_COLORS.get(group, "#aaaaaa"), ""))
 
     edges = [(f"A_{aid}", f"T_{tid}", n) for (aid, tid), n in weights.items()]
 
-    header = ["id", "label", "group", "size", "color"]
+    header = ["id", "label", "group", "size", "color", "phone"]   # phone: WhatsApp contacts only
     if keep_layout:
         nodes = with_old_layout(nodes, edges)
         header += ["layout_x", "layout_y", "layout_z"]

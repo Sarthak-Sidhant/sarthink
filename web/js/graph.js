@@ -145,12 +145,12 @@ export class Graph {
     const n = N.rows.length, c = N.col;
     const B = this.base = {
       n, ids: new Array(n), labels: new Array(n), groups: new Array(n), plat: new Array(n), size: new Float32Array(n),
-      col3: new Float32Array(n * 3), P: new Float64Array(n * 3), index: new Map(),
+      col3: new Float32Array(n * 3), P: new Float64Array(n * 3), index: new Map(), phone: new Array(n),
     };
     for (let i = 0; i < n; i++) {
       const d = N.rows[i];
       B.col3.set(rgba(d[c.color] || '#8899aa').slice(0, 3), i * 3);
-      B.ids[i] = d[c.id]; B.labels[i] = d[c.label]; B.groups[i] = d[c.group];
+      B.ids[i] = d[c.id]; B.labels[i] = d[c.label]; B.groups[i] = d[c.group]; B.phone[i] = c.phone !== undefined ? d[c.phone] || '' : '';
       B.size[i] = +d[c.size] || 1;
       B.plat[i] = platformOf(d[c.group]);
       B.P[i * 3] = +d[c.layout_x] || 0; B.P[i * 3 + 1] = +d[c.layout_y] || 0; B.P[i * 3 + 2] = +d[c.layout_z] || 0;
@@ -189,6 +189,7 @@ export class Graph {
     const n = this.n = bn + persons.length;
     const grow = (Arr, src, k = 1) => { const a = new Arr(n * k); a.set(src.subarray(0, bn * k)); return a; };
     this.ids = B.ids.concat(persons.map(p => p.node)); this.labels = B.labels.concat(persons.map(p => p.name));
+    this.phone = B.phone.concat(persons.map(() => ''));
     this.groups = B.groups.concat(persons.map(() => 'person')); this.plat = B.plat.concat(persons.map(() => 'person'));
     this.size = new Float32Array(n); this.size.set(B.size);
     this.col3 = grow(Float32Array, B.col3, 3);
@@ -209,6 +210,12 @@ export class Graph {
       }
       this._place(i, raw);
       this.accountsOf.set(p.node, p.members.map(m => B.ids[m]));
+      // ring: one equal arc per platform they're on (busiest first), so a small account still shows
+      const by = {};
+      for (const m of p.members) by[B.plat[m]] = (by[B.plat[m]] || 0) + B.size[m];
+      const plats = Object.keys(by).sort((a, b) => by[b] - by[a]);
+      p.ring = plats.map(plat => [plat, 1 / plats.length]);
+      p.index = i;
       for (const m of p.members) { this.personOf.set(B.ids[m], p.node); es.push(i); ed.push(m); }
     });
     this.es = Int32Array.from(es); this.ed = Int32Array.from(ed);
@@ -653,20 +660,40 @@ export class Graph {
         labels.push({ i, x, y, r: this.r[i] * z, strong: false }); shown++;
       }
     }
-    // people: a clear line from each person to each of their accounts (the faint GL edges are for chats)
+    // people: a soft curve from each person to each of their accounts, fading from the person into the account's
+    // platform colour; the hovered person's (or hovered account's person's) curves light up and flow
     if (this.peopleList?.length) {
+      const hov = this.hover >= 0 ? (this.ids[this.hover].startsWith('P_') ? this.ids[this.hover] : this.personOf?.get(this.ids[this.hover])) : null;
       c.lineCap = 'round'; c.setLineDash([]);
       for (const p of this.peopleList) {
-        const i = this.index.get(p.node);
+        const i = p.index;
         if (i === undefined || (this.hi && !this.hi.has(i) && !p.members.some(m => this.hi.has(m)))) continue;
-        const [px, py] = this.toScreen(i);
-        c.strokeStyle = i === this.me ? C.accent : C.plat.person; c.lineWidth = i === this.me ? 1.4 : 1.6;
-        c.globalAlpha = this.hi ? 0.75 : 0.5;
-        c.beginPath();
-        for (const m of p.members) { const [ax, ay] = this.toScreen(m); c.moveTo(px, py); c.lineTo(ax, ay); }
-        c.stroke();
+        const [px, py] = this.toScreen(i), on = p.node === hov, mine = i === this.me;
+        for (const m of p.members) {
+          const [ax, ay] = this.toScreen(m), dx = ax - px, dy = ay - py, len = Math.hypot(dx, dy) || 1;
+          if (len < 4) continue;
+          const bend = Math.min(60, len * 0.16);
+          const mx = (px + ax) / 2 - dy / len * bend, my = (py + ay) / 2 + dx / len * bend;
+          const g = c.createLinearGradient(px, py, ax, ay);
+          g.addColorStop(0, mine ? C.accent : C.plat.person); g.addColorStop(1, C.plat[this.plat[m]] || C.accent);
+          c.beginPath(); c.moveTo(px, py); c.quadraticCurveTo(mx, my, ax, ay);
+          c.strokeStyle = g; c.lineWidth = on ? 2 : 1.2;
+          c.globalAlpha = on ? 0.9 : this.hi ? 0.6 : hov ? 0.12 : (C.dark ? 0.38 : 0.32);
+          c.stroke();
+          if (on) {                                   // a bright dash flowing from the person to the account
+            c.globalAlpha = 1; c.lineWidth = 2.4; c.setLineDash([8, len]); c.lineDashOffset = -((t / 12) % (len + 8));
+            c.stroke(); c.setLineDash([]);
+          }
+        }
       }
       c.globalAlpha = 1;
+      for (const p of this.peopleList) {             // the person: a light hub ringed in their accounts' colours
+        const i = p.index;
+        if (i === undefined || i === this.me || (this.hi && !this.hi.has(i))) continue;
+        const [x, y] = this.toScreen(i);
+        if (x < -20 || x > this.w + 20 || y < -20 || y > this.h + 20) continue;
+        this._hub(c, x, y, Math.max(6, this.r[i] * z + 1) + (p.node === hov ? 1.5 : 0), p, C, hov && p.node !== hov);
+      }
     }
     // "you": a gradient orb with a slow breathing halo
     if (me) {
@@ -687,27 +714,63 @@ export class Graph {
     this._drawLabels(c, labels);
   }
 
+  // a person: surface-filled disc whose ring is split into one arc per platform they're on;
+  // initials inside once there is room
+  _hub(c, x, y, r, p, C, dim) {
+    const w = Math.max(2.2, r * 0.32);
+    c.save();                                       // the fill stays opaque: it covers the map's own dot
+    c.shadowColor = C.dark ? 'rgba(0, 0, 0, .45)' : 'rgba(40, 60, 110, .22)'; c.shadowBlur = 8; c.shadowOffsetY = 1.5;
+    c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fillStyle = C.surface; c.fill();
+    c.restore();
+    c.save(); c.globalAlpha = dim ? 0.55 : 1; c.lineWidth = w; c.lineCap = 'butt';
+    let a = -Math.PI / 2;
+    const gap = p.ring.length > 1 ? 0.12 : 0;
+    for (const [plat, share] of p.ring) {
+      const b = a + share * Math.PI * 2;
+      c.beginPath(); c.arc(x, y, r - w / 2, a + gap / 2, Math.max(a + gap / 2 + 0.05, b - gap / 2));
+      c.strokeStyle = C.plat[plat] || C.plat.person; c.stroke();
+      a = b;
+    }
+    if (r >= 9) {
+      const ini = cleanName(p.name).split(/\s+/).filter(Boolean).slice(0, 2).map(s => [...s][0]).join('').toUpperCase();
+      c.font = `600 ${Math.round(r * 0.72)}px Inter, system-ui, sans-serif`; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillStyle = C.text; c.fillText(ini, x, y + 0.5); c.textAlign = 'left';
+    }
+    c.restore();
+  }
+
   _drawLabels(c, labels) {
     const placed = [], C = this._C || this.colors;
     c.textBaseline = 'middle'; c.lineJoin = 'round';
     for (const L of labels) {
-      let t = L.text || cleanName(this.labels[L.i]);
+      const ph = !L.text && this.phone?.[L.i];
+      let t = ph || L.text || cleanName(this.labels[L.i]);
       if (t.length > 26) t = t.slice(0, 25) + '…';
+      let sub = ph ? cleanName(this.labels[L.i]) : '';
+      if (sub.length > 30) sub = sub.slice(0, 29) + '…';
+      const subFont = `500 ${L.strong ? 11 : 10}px Inter, system-ui, sans-serif`;
+      c.font = subFont; const sw = sub ? c.measureText(sub).width : 0;
       c.font = `${L.strong ? 600 : 500} ${L.strong ? 12 : 11}px Inter, system-ui, sans-serif`;
-      const w = c.measureText(t).width, pad = L.pill ? 8 : 3, x = L.x + L.r + 6, y = L.y;
-      const box = [x - 2, y - 10, x + w + pad * 2 + 2, y + 10];
+      const w = Math.max(c.measureText(t).width, sw), pad = L.pill ? 8 : 3, x = L.x + L.r + 6;
+      const hh = sub ? 17 : 10, y = sub ? L.y - 6 : L.y;      // two lines: the pair is centred on the node
+      const box = [x - 2, L.y - hh, x + w + pad * 2 + 2, L.y + hh];
       if (placed.some(b => !(box[2] < b[0] || box[0] > b[2] || box[3] < b[1] || box[1] > b[3]))) continue;
       placed.push(box);
       if (L.pill) {
         c.save();
         c.shadowColor = 'rgba(40, 60, 110, .18)'; c.shadowBlur = 10; c.shadowOffsetY = 2;
-        c.beginPath(); c.roundRect(x, y - 10, w + pad * 2, 20, 10);
+        c.beginPath(); c.roundRect(x, L.y - hh, w + pad * 2, hh * 2, sub ? 9 : 10);
         c.fillStyle = C.dark ? 'rgba(23, 30, 47, .92)' : 'rgba(255, 255, 255, .94)'; c.fill();
         c.restore();
         c.fillStyle = C.text; c.fillText(t, x + pad, y + 0.5);
+        if (sub) { const f = c.font; c.font = subFont; c.fillStyle = C.text2; c.fillText(sub, x + pad, y + 13); c.font = f; }
       } else {
         c.lineWidth = 4; c.strokeStyle = C.dark ? 'rgba(16, 22, 42, .85)' : 'rgba(255, 255, 255, .9)'; c.strokeText(t, x, y);
         c.fillStyle = L.strong ? C.text : C.text2; c.fillText(t, x, y);
+        if (sub) {
+          const f = c.font; c.font = subFont;
+          c.strokeText(sub, x, y + 12); c.fillStyle = C.muted; c.fillText(sub, x, y + 12); c.font = f;
+        }
       }
     }
   }
@@ -780,7 +843,7 @@ export class Graph {
   get meId() { return this.me >= 0 ? this.ids[this.me] : null; }
   nodeInfo(i) {
     const id = this.ids[i], kind = id.startsWith('P_') ? 'person' : id.startsWith('A_') ? 'account' : 'chat';
-    return { id, kind, label: this.labels[i], group: this.groups[i], platform: this.plat[i], size: this.size[i],
+    return { id, kind, label: this.labels[i], phone: this.phone?.[i] || '', group: this.groups[i], platform: this.plat[i], size: this.size[i],
              person: !!this.isPerson[i], personOf: this.personOf?.get(id) || null, accounts: this.accountsOf?.get(id) || null };
   }
   // the person an account belongs to (P_ id), if any; mine() = it is one of my own accounts
@@ -793,7 +856,8 @@ export class Graph {
       return `<b>${name}${i === this.me ? ' (you)' : ''}</b><span>person · ${k} account${k === 1 ? '' : 's'} · ${num(this.size[i])} messages</span>`;
     }
     const owner = this.personOf?.get(id), on = owner && owner !== ME_PERSON ? ` · ${esc(cleanName(this.labels[this.index.get(owner)]))}` : '';
-    return `<b>${name}</b><span>${this.isPerson[i] ? `${num(this.size[i])} messages` : 'conversation'} · ${esc(platformLabel(this.plat[i]))}${on}</span>`;
+    const ph = this.phone?.[i];
+    return `<b>${ph ? esc(ph) : name}</b><span>${ph ? `${name} · ` : ''}${this.isPerson[i] ? `${num(this.size[i])} messages` : 'conversation'} · ${esc(platformLabel(this.plat[i]))}${on}</span>`;
   }
 
   _bindInput() {

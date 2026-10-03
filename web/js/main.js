@@ -121,7 +121,7 @@ api('/api/people').catch(() => ({ people: [] }))
   .then(r => graph.load('/processed_data/graph/cosmograph_nodes.csv', '/processed_data/graph/cosmograph_edges.csv', r.people))
   .then(g => {
     const present = new Set(g.people.map(p => p.platform));
-    $('graph-legend').innerHTML = `<span><i style="background:var(--grad)"></i>You</span><span><i style="background:var(--person)"></i>People</span>` +
+    $('graph-legend').innerHTML = `<span><i style="background:var(--grad)"></i>You</span><span><i class="ring"></i>People</span>` +
       PLATFORMS.filter(p => present.has(p.key)).map(p => `<span><i style="background:var(${p.slot})"></i>${esc(p.label)}</span>`).join('');
     people.load();
     stage.graphLoaded();
