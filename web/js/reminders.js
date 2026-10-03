@@ -6,7 +6,7 @@ const PAGE = 200;
 
 export class Reminders {
   constructor() {
-    this.owner = 'me'; this.status = 'open'; this.q = ''; this.items = []; this.offset = 0; this.loaded = false;
+    this.owner = 'me'; this.status = 'now'; this.q = ''; this.items = []; this.offset = 0; this.loaded = false;
     seg('rem-owner', v => { this.owner = v; this.load(); });
     seg('rem-status', v => { this.status = v; this.load(); });
     let t;
@@ -21,7 +21,7 @@ export class Reminders {
 
   async badge() {
     try {
-      const d = await api('/api/commitments?owner=me&status=open&limit=1');
+      const d = await api('/api/commitments?owner=me&status=now&limit=1');
       $('rem-badge').textContent = d.counts.total || '';
     } catch { /* backend down: no badge */ }
   }
@@ -56,7 +56,7 @@ export class Reminders {
     groups.week.sort((a, b) => a.due.localeCompare(b.due));
     groups.later.sort((a, b) => a.due.localeCompare(b.due));
     groups.none.sort((a, b) => b.said_on.localeCompare(a.said_on));
-    const open = this.status === 'open';
+    const open = ['now', 'cleared', 'older'].includes(this.status);
     const names = { overdue: open ? 'Past due' : 'Was due', week: 'This week', later: 'Later', none: 'No date' };
     list.innerHTML = Object.entries(groups).filter(([, v]) => v.length).map(([k, v]) => `
       <div class="rem-group ${open ? k : ''}">
@@ -68,10 +68,11 @@ export class Reminders {
 
   row(it, today) {
     const dd = it.due ? daysBetween(today, it.due) : null;
-    const cls = it.status !== 'open' || dd === null ? '' : dd < 0 ? 'over' : dd <= 3 ? 'soon' : '';
+    const isOpen = ['now', 'older'].includes(it.status);
+    const cls = !isOpen || dd === null ? '' : dd < 0 ? 'over' : dd <= 3 ? 'soon' : '';
     const who = it.owner === 'me' ? 'You' : it.who;
     const others = it.people.filter(p => p !== it.who).slice(0, 3);
-    const acts = it.status === 'open'
+    const acts = isOpen
       ? `${it.due ? '<button data-act="calendar" title="Add to the calendar export">Calendar</button>' : ''}<button data-act="dismissed" title="Not a real reminder">Dismiss</button>`
       : '<button data-act="open" title="Move back to open">Reopen</button>';
     return `<div class="rem" data-cid="${esc(it.cid)}">
@@ -86,6 +87,7 @@ export class Reminders {
           ${others.length ? `<span>with ${esc(others.join(', '))}${it.people.length - 1 > others.length ? ' +' + (it.people.length - 1 - others.length) : ''}</span>` : ''}
           <span>${dot(it.platform)} said ${esc(fmtDate(it.said_on))}</span>
           ${it.status === 'calendar' ? '<span>· in calendar</span>' : ''}
+          ${it.status === 'cleared' && it.triage ? `<span class="cleared" title="Judged from the conversation; Reopen if wrong">${esc({ done: 'Done in chat', moot: 'Passed', trivial: 'Not a real to-do' }[it.triage.verdict] || it.triage.verdict)}: ${esc(it.triage.reason)}</span>` : ''}
         </div>
       </div>
       <div class="right">
@@ -171,7 +173,7 @@ function seg(id, onChange) {
     onChange(b.dataset.v);
   });
 }
-const labelOf = s => ({ open: 'open', done: 'done', dismissed: 'dismissed', calendar: 'in calendar' }[s] || s);
+const labelOf = s => ({ open: 'open', now: 'for now', cleared: 'auto-cleared', older: 'older', done: 'done', dismissed: 'dismissed', calendar: 'in calendar' }[s] || s);
 
 function undoToast(msg, undo) {
   const t = $('toast');

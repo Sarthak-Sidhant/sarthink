@@ -558,3 +558,4 @@ button:disabled { opacity: .5; cursor: default; }
 /* legend: a person is drawn as a ring in their platforms' colours */
 #graph-legend i.ring { background: conic-gradient(var(--series-6) 0 33%, var(--series-1) 0 66%, var(--series-3) 0);
   -webkit-mask: radial-gradient(circle, transparent 38%, #000 42%); mask: radial-gradient(circle, transparent 38%, #000 42%); }
+.rem .meta .cleared { color: var(--text-2); font-style: italic; }

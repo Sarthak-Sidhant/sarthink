@@ -12,7 +12,8 @@ Stages (each is safe to rerun; --from starts at one):
               are priced at DeepSeek's list price and projected; the rest runs only if the projection is within
               --budget (or you confirm). --offpeak waits for DeepSeek's half-price hours
   embeddings  8B vectors for chunks without one, on OpenRouter (~$0.01 per million tokens)
-  inbox       promises/plans from the new summaries (DeepSeek, small)
+  inbox       promises/plans from the new summaries, then triage: current items the chat already settled
+              (done, passed, trivial) move to "Auto-cleared" (DeepSeek, cents)
   graph       graph files re-exported; existing nodes keep their positions, new ones sit by their chats
 
 Restart the API afterwards (it caches accounts and vectors). The report is saved to
@@ -254,6 +255,7 @@ def stage_embeddings(a):
 
 def stage_inbox(a):
     run("scripts/index/build_commitments.py", "--tag", a.tag)
+    run("scripts/index/triage_inbox.py")       # settle current items against the chat (DeepSeek, cents)
 
 
 def stage_graph(a):

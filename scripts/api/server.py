@@ -711,27 +711,65 @@ def _status_db():
     return c
 
 
+_INBOX = {}          # per-server: chat sizes (people who wrote) and triage verdicts, read once
+
+
+def _inbox_facts():
+    if not _INBOX:
+        with LOCK:
+            _INBOX["members"] = dict(S.conn.execute(
+                "SELECT thread_id, COUNT(DISTINCT account_id) FROM MessageFacts GROUP BY thread_id").fetchall()) \
+                if S.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'MessageFacts'").fetchone() else {}
+            _INBOX["triage"] = {r[0]: (r[1], r[2]) for r in S.conn.execute(
+                "SELECT cid, verdict, reason FROM CommitmentTriage")} \
+                if S.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'CommitmentTriage'").fetchone() else {}
+    return _INBOX
+
+
+def _bucket(r, triage, members, today, reopened=False):
+    """Where an open item belongs. now: current (due within the last week or later, or undated and said in the last
+    3 weeks), involves you (yours, or theirs in a 1:1 chat or naming you) and not settled by the chat. cleared: the
+    triage found the chat settled it (done / moot / trivial). older: everything else, kept but out of the way."""
+    current = (r["due"] or "") >= (today - dt.timedelta(days=7)).isoformat() if r["due"] \
+        else r["said_on"] >= (today - dt.timedelta(days=21)).isoformat()
+    tid = (json.loads(r["nodes"]) and next((int(n[2:]) for n in json.loads(r["nodes"]) if n.startswith("T_")), None))
+    mine = r["owner"] == "me" or members.get(tid, 99) <= 2 or "sarthak" in f"{r['title']} {r['what']}".lower()
+    if not (current and mine):
+        return "older"
+    v = triage.get(r["cid"])
+    return "cleared" if v and v[0] != "pending" and not reopened else "now"     # your Reopen beats the triage
+
+
 @app.get("/api/commitments")
-def commitments(owner: str = "all", status: str = "open", q: str = "", limit: int = Query(40, le=200),
+def commitments(owner: str = "all", status: str = "now", q: str = "", limit: int = Query(40, le=200),
                 offset: int = 0):
+    """status: now | cleared | older (the open items, split by _bucket), calendar | done | dismissed, or all."""
     st = dict(_status_db().execute("SELECT cid, status FROM CommitmentStatus").fetchall())
+    facts, today = _inbox_facts(), dt.datetime.now(IST).date()
+    reopened = {c for c, v in st.items() if v == "open"}
     with LOCK:
         rows = S.conn.execute("SELECT * FROM Commitments ORDER BY COALESCE(due, said_on) DESC").fetchall()
-    items = []
+    items, buckets = [], {"now": 0, "cleared": 0, "older": 0}
     for r in rows:
         s = st.get(r["cid"], "open")
         if owner != "all" and r["owner"] != owner:
             continue
-        if status != "all" and s != status:
+        if s == "open":
+            s = _bucket(r, facts["triage"], facts["members"], today, r["cid"] in reopened)
+            buckets[s] += 1
+        if status not in ("all", s) and not (status == "open" and s in buckets):
             continue
         if q and q.lower() not in f"{r['title']} {r['what']} {r['people']}".lower():
             continue
+        tr = facts["triage"].get(r["cid"])
         items.append({"cid": r["cid"], "owner": r["owner"], "who": r["who"], "title": r["title"], "what": r["what"],
                       "due": r["due"], "said_on": r["said_on"], "platform": r["platform"],
                       "people": json.loads(r["people"]), "nodes": json.loads(r["nodes"]),
-                      "session_id": r["session_id"], "status": s})
+                      "session_id": r["session_id"], "status": s,
+                      "triage": {"verdict": tr[0], "reason": tr[1]} if tr else None})
     counts = {"total": len(items), "mine": sum(i["owner"] == "me" for i in items),
-              "theirs": sum(i["owner"] == "them" for i in items), "with_due": sum(bool(i["due"]) for i in items)}
+              "theirs": sum(i["owner"] == "them" for i in items), "with_due": sum(bool(i["due"]) for i in items),
+              **buckets}
     return {"counts": counts, "items": items[offset:offset + limit]}
 
 
