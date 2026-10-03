@@ -36,7 +36,7 @@ python3 run.py --demo         # then open http://127.0.0.1:8080
 | Click **📥 Inbox** | promises found in chats (e.g. "Scan and send offer letter to Ananya") → done / calendar (.ics) |
 | Click **📅 On this day**, pick 21 Dec, *Review this day* | journal-style recap of that day, cited |
 | Say *"please remember that Kabir is my school friend from Patna"*, then ask about Kabir | plain-language notes that come back only when relevant |
-| Click **Rohan**, then *Same person* on the suggested Twitter account | contacts: one human, many accounts; the graph and stats merge live |
+| Open **People → Rohan**, then add his Twitter account from the suggestions | people group accounts; the graph links them at once |
 | Ask *"When did I go skydiving?"* | it says it can't find it instead of inventing a memory |
 
 ---
@@ -55,12 +55,13 @@ python3 run.py --demo         # then open http://127.0.0.1:8080
 - **On this day + day review** — your conversations on this date in earlier years, and a cited recap of any day.
 - **Notes** — tell it things in plain language ("remember that FireRoz uses she/her"); notes attach only when
   that person or topic comes up, and are cited as `[note]`.
-- **Contacts (identity resolution)** — your accounts across platforms are one "me". For everyone else, a
-  dossier lists the accounts behind that person and suggests same-name accounts on other platforms. You
-  confirm ("Same person" / "Not them"), link any account by searching for it, unlink, or rename. A
-  deleted/deactivated account is one person per chat with an honest name, and you can link that chat to the
-  person you know it was. Links are never automatic; they're kept in `user_notes.db` and applied live, so the
-  graph, stats, search filters and notes follow at once. A hand-written `person_merges.json` is imported once.
+- **Accounts and people** — every platform account is an account with its own summary and graph node. A
+  person groups the accounts of one human (Riya = her WhatsApp + Instagram); you are person 1, holding your
+  own accounts. Group same-name suggestions ("Same person" / "Not them"), add or remove accounts, create, rename
+  or delete people: each is one row in `user_notes.db`, so it is instant and nothing is rebuilt. A person's
+  summary combines their accounts; search, the assistant and notes accept a person or one account. A
+  deleted/deactivated account is one account per chat with an honest name. A hand-written
+  `person_merges.json` is imported once. See `docs/accounts-and-people.md`.
 - **Privacy guards** — phone numbers, emails, addresses and order numbers are masked in answers; data and
   notes stay in local files.
 
@@ -132,9 +133,9 @@ python3 run.py --model 0.6b                      # or: python3 run.py --gpu <ssh
 
 Put the new export next to the old one in `archive/` (keep the old one) and rerun the same steps. Parsers only
 add: messages already stored are skipped (Instagram/Facebook ones are matched by chat, time and text, since
-their ids change between exports), and messages that only the old export still has are kept. People keep
-their `person_id` across rebuilds (recorded in `user_notes.db`, table `PersonIds`), so notes, contacts and
-the graph stay attached to the right person. Unchanged conversations keep their session and chunk ids, so
+their ids change between exports), and messages that only the old export still has are kept. Accounts keep
+their `account_id` across rebuilds (recorded in `user_notes.db`, table `AccountIds`) and people live there too,
+so notes, people and the graph stay attached to the right accounts. Unchanged conversations keep their session and chunk ids, so
 `summarize_sessions.py` only pays for new ones, and until the new chunks are embedded search finds them by
 keyword. Don't delete `sarthink_index.db` to update: it holds the paid-for summaries.
 `--fresh` on the Twitter/Meta parsers wipes that platform and reparses it; it is not needed for updates.

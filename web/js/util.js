@@ -28,15 +28,18 @@ export const PLATFORMS = [
 export function platformOf(s) {
   s = String(s || '').toLowerCase();
   if (s === 'me') return 'me';
+  if (s === 'person') return 'person';      // a person: a group of accounts, not one platform
   return (PLATFORMS.find(p => s.startsWith(p.key)) || {}).key || 'other';
 }
 export function platformColor(p) {
   const k = platformOf(p);
   if (k === 'me') return css('--me');
+  if (k === 'person') return css('--person');
   const slot = PLATFORMS.find(x => x.key === k);
   return slot ? css(slot.slot) : css('--muted');
 }
-export const platformLabel = p => (PLATFORMS.find(x => x.key === platformOf(p)) || { label: p || 'Other' }).label;
+export const platformLabel = p => platformOf(p) === 'person' ? 'Person'
+  : (PLATFORMS.find(x => x.key === platformOf(p)) || { label: p || 'Other' }).label;
 export const dot = p => `<i class="pdot" style="background:${platformColor(p)}" title="${esc(platformLabel(p))}"></i>`;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

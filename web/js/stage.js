@@ -85,12 +85,13 @@ export class Stage {
     if (this.focus.visible) this.focus.focus(`S_${sessionId}`);
   }
 
-  async showPerson(pid, name) {
-    if (!this.ready) { this._pending = () => this.showPerson(pid, name); return; }
+  // ref: a person (P_<id>) or an account (A_<id>)
+  async showPerson(ref, name) {
+    if (!this.ready) { this._pending = () => this.showPerson(ref, name); return; }
     $('focus-what').innerHTML = `<b>${esc(cleanName(name || ''))}</b> · reading your history…`;
     $('focus-bar').hidden = false;
     let d;
-    try { d = await getDossier(pid); } catch (e) { $('focus-what').textContent = `Couldn't load (${e.message})`; return; }
+    try { d = await getDossier(ref); } catch (e) { $('focus-what').textContent = `Couldn't load (${e.message})`; return; }
     const m = await this._load();
     if (!m) { $('focus-bar').hidden = true; this.highlight([d.node, ...d.top_chats.map(c => c.node)], { focus: [d.node] }); return; }
     const spec = m.specFromPerson(d, this.graph);
@@ -127,7 +128,7 @@ export class Stage {
   // a thin scene gets depth: the people the answer is about (named in it, or the only ones there)
   // bring their themes, the conversations under each theme, and their chats
   async _enrich(m, spec, named = []) {
-    const inScene = spec.nodes.filter(n => n.kind === 'person' && n.pid);
+    const inScene = spec.nodes.filter(n => n.kind === 'person' && n.ref);
     const sessions = spec.nodes.filter(n => n.kind === 'session').length;
     if (sessions >= 6) return spec;
     const namedSet = new Set(named);
@@ -136,7 +137,7 @@ export class Stage {
     people = people.slice(0, 3);
     if (!people.length) return spec;
     $('focus-what').innerHTML = '<b>Building the graph</b> · reading your history…'; $('focus-bar').hidden = false;
-    const ds = (await Promise.allSettled(people.map(p => getDossier(p.pid)))).filter(r => r.status === 'fulfilled').map(r => r.value);
+    const ds = (await Promise.allSettled(people.map(p => getDossier(p.ref)))).filter(r => r.status === 'fulfilled').map(r => r.value);
     return ds.length ? m.enrichSpec(spec, ds, this.graph) : spec;
   }
 

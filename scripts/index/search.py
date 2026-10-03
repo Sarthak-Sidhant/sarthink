@@ -18,6 +18,13 @@ from build_embeddings import OUT_DIR, slug
 
 RRF_K = 60
 MODELS = {"0.6b": "Qwen/Qwen3-Embedding-0.6B", "4b": "Qwen/Qwen3-Embedding-4B", "8b": "Qwen/Qwen3-Embedding-8B"}
+# Hosted query encoder: the same Qwen3 weights on OpenRouter (vectors match the GPU-built ones, cosine ~0.9998).
+# Used with encoder_url="openrouter" (EMBED_URL=openrouter); needs OPENROUTER_API_KEY in the environment or .env.
+OPENROUTER_MODELS = {"Qwen/Qwen3-Embedding-8B": "qwen/qwen3-embedding-8b", "Qwen/Qwen3-Embedding-4B": "qwen/qwen3-embedding-4b"}
+# Nebius measured fastest (median 0.66s vs 1.3s DeepInfra, 2.0s SiliconFlow fp8) and matches the stored vectors
+# best (cosine 0.9999); DeepInfra is the fallback if Nebius is down.
+OPENROUTER_ROUTE = {"order": ["nebius", "deepinfra"], "allow_fallbacks": True}
+QUERY_PROMPT = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
 RERANK_INSTRUCTION = "Given a question Sarthak asks about his own chat history, judge whether this chat excerpt answers it"
 
 
@@ -60,14 +67,16 @@ class Reranker:
 
 class Searcher:
     """encoder_url: base URL of embed_server.py (query vectors computed on a remote GPU); without it the
-    embedding model is loaded locally. Filters (platform, person_id, since, until, me_only) apply to both
-    the dense and keyword legs."""
+    embedding model is loaded locally. Filters (platform, accounts, since, until, me_only) apply to both
+    the dense and keyword legs; accounts is a set of account ids (a person is the set of their accounts)."""
 
     def __init__(self, model="Qwen/Qwen3-Embedding-0.6B", variant="ctx", device=None, me_boost=0.0, reranker=None,
                  encoder_url=None):
         model = MODELS.get(model, model)
         self.reranker = reranker
         self.encoder_url = encoder_url.rstrip("/") if encoder_url else None
+        self.model_name = model
+        self._qcache = {}
         self.conn = connect_index()
         base = OUT_DIR / f"emb_{slug(model)}_{variant}"
         self.model = None
@@ -106,10 +115,10 @@ class Searcher:
         self.start_ts = np.zeros(n, dtype=np.int64)
         self.end_ts = np.zeros(n, dtype=np.int64)
         self.me_arr = np.zeros(n, dtype=bool)
-        self.persons = [()] * n
+        self.accounts = [()] * n
         self.me = {}
         for r in self.conn.execute(
-                "SELECT chunk_id, index_policy, me_involved, platform, start_ts, end_ts, person_ids FROM Chunks"):
+                "SELECT chunk_id, index_policy, me_involved, platform, start_ts, end_ts, account_ids FROM Chunks"):
             self.me[r["chunk_id"]] = r["me_involved"]
             i = self.row.get(r["chunk_id"])
             if i is None:
@@ -118,11 +127,11 @@ class Searcher:
             self.platform[i] = r["platform"]
             self.start_ts[i], self.end_ts[i] = r["start_ts"], r["end_ts"]
             self.me_arr[i] = bool(r["me_involved"])
-            self.persons[i] = tuple(json.loads(r["person_ids"]))
+            self.accounts[i] = tuple(json.loads(r["account_ids"]))
 
-    def mask(self, platform=None, person_id=None, since=None, until=None, me_only=False):
+    def mask(self, platform=None, accounts=None, since=None, until=None, me_only=False):
         """Boolean row mask for the filters, or None when no filter is set."""
-        if not any([platform, person_id, since, until, me_only]):
+        if not any([platform, accounts, since, until, me_only]):
             return None
         m = np.ones(len(self.ids), dtype=bool)
         if platform:
@@ -133,11 +142,55 @@ class Searcher:
             m &= self.start_ts <= until
         if me_only:
             m &= self.me_arr
-        if person_id:
-            m &= np.fromiter((person_id in p for p in self.persons), dtype=bool, count=len(self.persons))
+        if accounts:
+            want = set(accounts)
+            m &= np.fromiter((not want.isdisjoint(a) for a in self.accounts), dtype=bool, count=len(self.accounts))
         return m
 
     def encode_query(self, q):
+        if q in self._qcache:                            # the agent often repeats a phrasing within one answer
+            return self._qcache[q]
+        v = self._encode_query(q)
+        if len(self._qcache) > 2000:
+            self._qcache.clear()
+        self._qcache[q] = v
+        return v
+
+    def _openrouter(self, texts):
+        if getattr(self, "_http", None) is None:
+            import os
+            import httpx
+            from dotenv import dotenv_values
+            from common import REPO_ROOT
+            key = os.environ.get("OPENROUTER_API_KEY") or dotenv_values(REPO_ROOT / ".env").get("OPENROUTER_API_KEY")
+            self._http = httpx.Client(timeout=httpx.Timeout(20, connect=5), base_url="https://openrouter.ai/api/v1",
+                                      headers={"Authorization": f"Bearer {key}"})
+        r = self._http.post("/embeddings", json={"model": OPENROUTER_MODELS[self.model_name],
+                                                 "input": [QUERY_PROMPT + t for t in texts], "provider": OPENROUTER_ROUTE},
+                            timeout=20 if len(texts) == 1 else 90)      # batches (evals) may queue longer
+        r.raise_for_status()
+        out = []
+        for d in sorted(r.json()["data"], key=lambda d: d["index"]):
+            v = np.asarray(d["embedding"], dtype=np.float32)
+            out.append(v / (np.linalg.norm(v) or 1))
+        return out
+
+    def prefetch(self, qs):
+        """Encode several queries in one request (e.g. all phrasings of one agent search) so the dense legs that
+        follow are cache hits. Never raises: a failure just leaves dense() to fall back to keywords."""
+        todo = [q for q in dict.fromkeys(qs) if q not in self._qcache]
+        if not todo or self.vecs is None:
+            return
+        try:
+            vs = self._openrouter(todo) if self.encoder_url == "openrouter" else [self._encode_query(q) for q in todo]
+            for q, v in zip(todo, vs):
+                self._qcache[q] = v
+        except Exception as e:
+            print(f"[search] query prefetch failed: {type(e).__name__}: {e}")
+
+    def _encode_query(self, q):
+        if self.encoder_url == "openrouter":
+            return self._openrouter([q])[0]
         if self.encoder_url:
             if getattr(self, "_http", None) is None:   # keep-alive: skip a tunnel round trip per query
                 import httpx

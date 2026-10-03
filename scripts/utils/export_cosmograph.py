@@ -72,34 +72,37 @@ def clean(s, n=None):
 
 
 def export(conn=None, keep_layout=False):
+    """Account (A_) and thread (T_) nodes, account->thread edges. People are not in these files: the API serves
+    them and the viewer draws them linked to their accounts, so linking never rewrites the graph."""
     conn = conn or connect_index()
-    person_of = {r["user_id"]: r["person_id"] for r in conn.execute("SELECT user_id, person_id FROM PersonAliases")}
-    per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
-    persons = {r["person_id"]: dict(r) for r in conn.execute("SELECT person_id, name, is_me FROM Persons")}
-    user_platform = {r["id"]: r["platform"] for r in conn.execute("SELECT id, platform FROM src.Users")}
+    account_of = {r[0]: r[1] for r in conn.execute("SELECT user_id, account_id FROM AccountUsers")}
+    per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, account_id FROM AccountThreads")}
+    accounts = {r["account_id"]: dict(r) for r in conn.execute("SELECT account_id, name, platform, is_me FROM Accounts")}
 
-    weights = defaultdict(int)          # (person, thread) -> messages
-    person_platform = {}
+    weights = defaultdict(int)          # (account, thread) -> messages
     for author_id, thread_id, n in conn.execute(
             "SELECT author_id, thread_id, COUNT(*) FROM src.Messages GROUP BY author_id, thread_id"):
-        pid = per_chat.get((author_id, thread_id), person_of.get(author_id))
-        if pid is None:
-            continue
-        weights[(pid, thread_id)] += n
-        person_platform.setdefault(pid, user_platform.get(author_id))
+        aid = per_chat.get((author_id, thread_id), account_of.get(author_id))
+        if aid is not None:
+            weights[(aid, thread_id)] += n
 
     size = defaultdict(int)
-    for (pid, tid), n in weights.items():
-        size[f"P_{pid}"] += n
+    for (aid, tid), n in weights.items():
+        size[f"A_{aid}"] += n
         size[f"T_{tid}"] += n
 
     nodes = []
-    for pid in {p for p, _ in weights}:
-        p = persons[pid]
-        group = "me" if p["is_me"] else f"{person_platform[pid]}_user"
-        nodes.append((f"P_{pid}", clean(p["name"]), group, size[f"P_{pid}"], GROUP_COLORS.get(group, "#aaaaaa")))
+    for aid in {a for a, _ in weights}:
+        a = accounts[aid]
+        group = f"{a['platform']}_me" if a["is_me"] else f"{a['platform']}_user"   # my accounts: "<platform>_me"
+        label = a["name"]
+        if a["is_me"]:          # "Me on Discord (sarthak sidhant)", or just "Me on WhatsApp" when it carries my name
+            plat = a["platform"].capitalize().replace("Whatsapp", "WhatsApp")
+            label = f"Me on {plat}" + ("" if "(me)" in a["name"] else f" ({a['name']})")
+        color = GROUP_COLORS["me"] if a["is_me"] else GROUP_COLORS.get(group, "#aaaaaa")
+        nodes.append((f"A_{aid}", clean(label), group, size[f"A_{aid}"], color))
 
-    # identical labels for different people (e.g. many deleted accounts) get #2, #3… in the graph only
+    # identical labels for different accounts (e.g. many deleted accounts) get #2, #3… in the graph only
     seen = defaultdict(int)
     for i in sorted(range(len(nodes)), key=lambda i: -nodes[i][3]):     # biggest keeps the plain label
         nid, label, group, weight, color = nodes[i]
@@ -115,7 +118,7 @@ def export(conn=None, keep_layout=False):
         nodes.append((f"T_{r['id']}", clean(r["title"], 45) or "Untitled", group, size[f"T_{r['id']}"],
                       GROUP_COLORS.get(group, "#aaaaaa")))
 
-    edges = [(f"P_{pid}", f"T_{tid}", n) for (pid, tid), n in weights.items()]
+    edges = [(f"A_{aid}", f"T_{tid}", n) for (aid, tid), n in weights.items()]
 
     header = ["id", "label", "group", "size", "color"]
     if keep_layout:
@@ -142,6 +145,8 @@ def export(conn=None, keep_layout=False):
 def with_old_layout(nodes, edges):
     with open(OUT_DIR / "cosmograph_nodes.csv", encoding="utf-8") as f:
         pos = {r["id"]: (r["layout_x"], r["layout_y"], r["layout_z"]) for r in csv.DictReader(f)}
+    for k in [k for k in pos if k.startswith("P_")]:     # files written before accounts and people were split
+        pos.setdefault("A_" + k[2:], pos[k])
     near = defaultdict(list)
     for p, t, _ in edges:
         if t in pos:

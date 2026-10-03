@@ -33,6 +33,7 @@
   /* platform slots, fixed order (validated: CVD-safe adjacent pairs on this surface) + the activity ramp */
   --series-1: #2f8fe0; --series-2: #f0754f; --series-3: #1fa595; --series-4: #7a63dd; --series-5: #e05b9c; --series-6: #c9900c;
   --me: #18223a;
+  --person: #56607a;      /* a person (group of accounts): slate, unlike any platform */
   --ramp-light: #f4b3d3;
   --graph-bg: #f7faff;
   --graph-wash:
@@ -61,7 +62,7 @@
   --good: #3cbf8a; --warn: #e0a030; --bad: #ef6b8c;
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 24px rgba(0, 0, 0, .3); --shadow-lg: 0 12px 48px rgba(0, 0, 0, .55);
   --series-1: #3a93e0; --series-2: #e0683f; --series-3: #1d9a8b; --series-4: #8f7bf0; --series-5: #d9559a; --series-6: #e0a83a;
-  --me: #eef2fb; --ramp-light: #6b3a5c;
+  --me: #eef2fb; --ramp-light: #6b3a5c; --person: #aab3c9;
   --graph-bg: #10162a;
   --graph-wash:
     radial-gradient(60% 70% at 50% 50%, rgba(40, 52, 90, .9) 0%, rgba(40, 52, 90, 0) 70%),
@@ -525,3 +526,28 @@ button:disabled { opacity: .5; cursor: default; }
 .m-side { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
 .m-side b { display: block; font-weight: 500; } .m-side span { font-size: 12px; color: var(--muted); }
 .m-side:hover b { color: var(--accent-ink); }
+
+/* Contacts: per-account summaries */
+.by-acct { display: flex; flex-direction: column; gap: 10px; }
+.acct-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.acct-card > summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px 16px; cursor: pointer;
+  list-style: none; font-size: 13px; }
+.acct-card > summary::-webkit-details-marker { display: none; }
+.acct-card > summary .ttl { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.acct-card > summary .ttl b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-card[open] > summary { border-bottom: 1px solid var(--border); }
+.acct-body { padding: 12px 16px 14px; }
+.acct-stats { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--text-2); margin-bottom: 12px; }
+.acct-stats b { color: var(--text); font-weight: 600; }
+
+/* People & accounts (docs/accounts-and-people.md) */
+.chips .chips-row { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; margin-top: 4px; }
+.ppl .tag { color: var(--text-2); font-weight: 500; }
+.ppl.sugg .nm span { display: flex; align-items: center; gap: 4px; }
+.p-panel .owner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--text-2); }
+.p-panel .owner a { color: var(--text); }
+.p-panel h2 .h-acts { margin-left: auto; display: inline-flex; gap: 6px; }
+.p-panel h2 { display: flex; align-items: center; gap: 8px; }
+.chat-row .link { cursor: pointer; }
+.chat-row .link:hover { text-decoration: underline; }
+.acct-body .acct-stats a { color: var(--accent-ink); }

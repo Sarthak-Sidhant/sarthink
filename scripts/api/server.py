@@ -8,11 +8,14 @@ else — vectors, keyword index, chats — stays on this machine.
   GET /api/search?q=...&k=10&platform=&person=&since=YYYY-MM-DD&until=&me_only=false
   GET /api/session/{session_id}  full conversation span + LLM summary + neighbours
   GET /api/chunk/{chunk_id}
-  GET /api/person?name=...       name -> person candidates
-  GET /api/person/{id}/accounts  accounts behind a person + same-person suggestions; POST .../link, .../unlink,
-                                 .../name, .../reject edit contacts and relink the index live
+  GET /api/person?name=...       name -> people (P_) and accounts (A_) matching it
+  GET /api/account/{id}[/dossier] one account: info, its person, suggestions / stats + themes
+  GET /api/people[/{id}[/dossier]] people (groups of accounts) / one person / stats + themes over their accounts
+  POST /api/people, /api/people/{id}/accounts, /name; DELETE /api/people/{id}[/accounts/{aid}]   (instant)
+  GET /api/suggestions, POST /api/suggestions/reject   same-name accounts that may be one human
 
-Every hit carries message ids (for citations) and graph node ids (P_<person>, T_<thread>) to highlight.
+Accounts vs people: docs/accounts-and-people.md. Every hit carries message ids (for citations) and graph node
+ids to highlight: A_<account> for who wrote, P_<person> for the people those accounts belong to, T_<thread>.
 
 Run: EMBED_URL=http://127.0.0.1:8100 python3 scripts/api/server.py [--port 8000]
 """
@@ -35,19 +38,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "index"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "api"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "utils"))
-from common import DATA_DIR, EMBED_MODEL, GRAPH_DIR, INDEX_DB, PROFILE_CACHE, SRC_DB, USER_DB, connect_index  # noqa: E402
+from common import DATA_DIR, EMBED_MODEL, GRAPH_DIR, PROFILE_CACHE, USER_DB, connect_index  # noqa: E402
 from search import Searcher  # noqa: E402
 from agent import Agent  # noqa: E402
-import build_identity  # noqa: E402
-import export_cosmograph  # noqa: E402
-from contacts import ContactStore, accounts_of, refresh_person_lists  # noqa: E402
+from people import ME, PeopleStore  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 SUMMARY_MODEL, SUMMARY_VERSION = "deepseek-flash", "v3"
 
 app = FastAPI(title="Sarthink")
 S: Searcher = None
-NAMES = {}
+NAMES = {}          # account_id -> account name
+ACCOUNTS = {}       # account_id -> {key, platform, is_me, placeholder, messages}
+KEY2AID = {}        # (platform, raw_id, chat) -> account_id
+PEOPLE: PeopleStore = None
 LOCK = threading.Lock()   # one shared read-only SQLite connection; requests run on worker threads
 
 
@@ -102,24 +106,114 @@ def to_ts(date_str, end=False):
     return int(d.timestamp())
 
 
-def resolve_person(name_or_id):
-    if not name_or_id:
-        return None
-    if str(name_or_id).lstrip("P_").isdigit():
-        return int(str(name_or_id).lstrip("P_"))
-    hits = person_candidates(name_or_id, limit=1)
-    if not hits:
-        raise HTTPException(404, f"no person matching {name_or_id!r}")
-    return hits[0]["person_id"]
+def people_index():
+    """Current people (user DB, small; read fresh so links show up at once): {pid: name}, {pid: [aid]}, {aid: pid}."""
+    names = PEOPLE.people()
+    members, person_of = {}, {}
+    for key, pid in PEOPLE.membership().items():
+        aid = KEY2AID.get(key)
+        if aid is not None and pid in names:
+            members.setdefault(pid, []).append(aid)
+            person_of[aid] = pid
+    return names, members, person_of
 
 
-def person_candidates(name, limit=10):
-    rows = S.conn.execute("""
-        SELECT p.person_id, p.name, p.is_me, p.platform, p.message_count AS messages FROM Persons p
-        WHERE lower(p.name) LIKE ? OR p.person_id IN (SELECT person_id FROM PersonAliases WHERE lower(name) LIKE ?)
-        ORDER BY p.message_count DESC LIMIT ?""", (f"%{name.lower()}%", f"%{name.lower()}%", limit)).fetchall()
-    return [{"person_id": r["person_id"], "node": f"P_{r['person_id']}", "name": r["name"], "is_me": bool(r["is_me"]),
-             "platform": r["platform"], "messages": r["messages"]} for r in rows]
+def account_row(aid, person_of=None, names=None):
+    a = ACCOUNTS.get(aid)
+    if not a:
+        raise HTTPException(404, f"account {aid} not found")
+    if person_of is None:
+        names, _, person_of = people_index()
+    pid = person_of.get(aid)
+    return {"account_id": aid, "node": f"A_{aid}", "name": NAMES.get(aid, "?"), "platform": a["platform"],
+            "is_me": a["is_me"], "placeholder": a["placeholder"], "messages": a["messages"], "key": list(a["key"]),
+            "person_id": pid, "person_node": f"P_{pid}" if pid else None, "person": names.get(pid) if pid else None}
+
+
+def person_row(pid, names=None, members=None):
+    if names is None:
+        names, members, _ = people_index()
+    if pid not in names:
+        raise HTTPException(404, f"person {pid} not found")
+    aids = sorted(members.get(pid, []), key=lambda a: -ACCOUNTS[a]["messages"])
+    return {"person_id": pid, "node": f"P_{pid}", "name": names[pid], "is_me": pid == ME,
+            "messages": sum(ACCOUNTS[a]["messages"] for a in aids),
+            "platforms": sorted({ACCOUNTS[a]["platform"] for a in aids}),
+            "accounts": [{"account_id": a, "node": f"A_{a}", "name": NAMES.get(a, "?"), "platform": ACCOUNTS[a]["platform"],
+                          "messages": ACCOUNTS[a]["messages"], "is_me": ACCOUNTS[a]["is_me"]} for a in aids]}
+
+
+def resolve(ref):
+    """'P_<id>' (a person: all their accounts), 'A_<id>' (one account) or a name (people first, then accounts)
+    -> {kind, id, node, name, scope, account_ids}."""
+    ref = str(ref).strip()
+    names, members, person_of = people_index()
+    kind, ident = None, None
+    if ref[:2] in ("P_", "A_") and ref[2:].isdigit():
+        kind, ident = ("person" if ref[0] == "P" else "account"), int(ref[2:])
+    elif ref.isdigit():
+        kind, ident = "account", int(ref)
+    else:
+        hits = candidates(ref, limit=1, names=names, members=members, person_of=person_of)
+        if not hits:
+            raise HTTPException(404, f"no person or account matching {ref!r}")
+        kind, ident = hits[0]["kind"], hits[0]["id"]
+    if kind == "person":
+        p = person_row(ident, names, members)
+        return {"kind": "person", "id": ident, "node": p["node"], "name": p["name"], "scope": f"P:{ident}",
+                "account_ids": [a["account_id"] for a in p["accounts"]], "accounts": p["accounts"]}
+    a = account_row(ident, person_of, names)
+    return {"kind": "account", "id": ident, "node": a["node"], "name": a["name"], "scope": f"A:{ident}",
+            "account_ids": [ident], "person": a["person"], "person_node": a["person_node"]}
+
+
+def resolve_accounts(ref):
+    return set(resolve(ref)["account_ids"]) if ref else None
+
+
+def candidates(name, limit=10, names=None, members=None, person_of=None):
+    """People whose name matches (with all their accounts) first, then accounts that match."""
+    if names is None:
+        names, members, person_of = people_index()
+    q = name.lower().strip()
+    out = []
+    for pid, pname in names.items():
+        if q and q in pname.lower():
+            p = person_row(pid, names, members)
+            out.append({"kind": "person", "id": pid, "node": p["node"], "name": pname, "is_me": pid == ME,
+                        "platforms": p["platforms"], "accounts": len(p["accounts"]), "messages": p["messages"],
+                        "exact": pname.lower() == q})
+    rows = S.conn.execute("""SELECT account_id FROM Accounts WHERE lower(name) LIKE ?
+                             ORDER BY message_count DESC LIMIT ?""", (f"%{q}%", limit * 3)).fetchall()
+    for (aid,) in rows:
+        a = account_row(aid, person_of, names)
+        out.append({"kind": "account", "id": aid, "node": a["node"], "name": a["name"], "is_me": a["is_me"],
+                    "platforms": [a["platform"]], "accounts": 1, "messages": a["messages"],
+                    "person": a["person"], "person_node": a["person_node"], "exact": a["name"].lower() == q})
+    out.sort(key=lambda c: (not c["exact"], c["kind"] != "person", -c["messages"]))
+    return out[:limit]
+
+
+def nodes_for(account_ids, thread_ids, person_of=None):
+    """Graph nodes to light up: the accounts, the people they belong to, the threads."""
+    if person_of is None:
+        _, _, person_of = people_index()
+    pids = []
+    for a in account_ids:
+        p = person_of.get(a)
+        if p and f"P_{p}" not in pids:
+            pids.append(f"P_{p}")
+    return [f"A_{a}" for a in account_ids] + pids + [f"T_{t}" for t in thread_ids]
+
+
+def people_for(account_ids, names=None, person_of=None):
+    """Who is in a chunk/session: each account with the person it belongs to. My accounts carry my name, as
+    the conversation text shows them."""
+    if names is None:
+        names, _, person_of = people_index()
+    return [{"node": f"A_{a}", "name": names.get(ME) if ACCOUNTS.get(a, {}).get("is_me") else NAMES.get(a, "?"),
+             "person": names.get(person_of.get(a)) if person_of.get(a) else None,
+             "person_node": f"P_{person_of[a]}" if a in person_of else None} for a in account_ids]
 
 
 def chunk_payload(cid, score=None):
@@ -129,8 +223,9 @@ def chunk_payload(cid, score=None):
         WHERE c.chunk_id = ?""", (SUMMARY_MODEL, SUMMARY_VERSION, cid)).fetchone()
     if not r:
         raise HTTPException(404, f"chunk {cid} not found")
-    persons = json.loads(r["person_ids"])
+    accts = json.loads(r["account_ids"])
     threads = json.loads(r["thread_ids"])
+    names, _, person_of = people_index()
     msgs = [m[0] for m in S.conn.execute(
         "SELECT msg_id FROM ChunkMessages WHERE chunk_id = ? ORDER BY position", (cid,))]
     return {
@@ -138,8 +233,8 @@ def chunk_payload(cid, score=None):
         "header": ist_header(r["header"], r["start_ts"], r["end_ts"]), "context": r["context"],
         "text": ist_text(r["text"]),
         "start": iso(r["start_ts"]), "end": iso(r["end_ts"]), "me_involved": bool(r["me_involved"]),
-        "people": [{"node": f"P_{p}", "name": NAMES.get(p, "?")} for p in persons],
-        "nodes": [f"P_{p}" for p in persons] + [f"T_{t}" for t in threads],
+        "people": people_for(accts, names, person_of),
+        "nodes": nodes_for(accts, threads, person_of),
         "message_ids": msgs,
     }
 
@@ -148,7 +243,9 @@ def chunk_payload(cid, score=None):
 @locked
 def health():
     enc = None
-    if S.encoder_url:
+    if S.encoder_url == "openrouter":       # hosted encoder: no health endpoint of ours to ask
+        enc = {"ok": True, "provider": "openrouter"}
+    elif S.encoder_url:
         try:
             import httpx
             enc = httpx.get(f"{S.encoder_url}/health", timeout=5).json()
@@ -158,24 +255,26 @@ def health():
 
 
 @app.get("/api/search")
-@locked
 def search(q: str, k: int = Query(10, le=50), platform: str = None, person: str = None,
            since: str = None, until: str = None, me_only: bool = False, mode: str = "hybrid"):
-    filters = dict(platform=platform, person_id=resolve_person(person), since=to_ts(since),
-                   until=to_ts(until, end=True), me_only=me_only)
-    try:
-        hits = S.search(q, k=k, mode=mode, **filters)
-    except Exception as e:  # e.g. encoder unreachable -> fall back to keyword search, say so
-        hits = S.search(q, k=k, mode="fts", **filters)
-        return {"query": q, "mode": "fts", "warning": f"dense search unavailable: {str(e)[:150]}",
-                "results": [chunk_payload(c, s) for c, s in hits]}
-    results = []
-    for c, sc in hits:
+    if mode != "fts":
+        S.prefetch([q])                # the query vector comes over the network: fetch it before taking the lock
+    with LOCK:
+        filters = dict(platform=platform, accounts=resolve_accounts(person), since=to_ts(since),
+                       until=to_ts(until, end=True), me_only=me_only)
         try:
-            results.append(chunk_payload(c, sc))
-        except HTTPException:          # vector index briefly ahead/behind the chunk table during rebuilds
-            continue
-    return {"query": q, "mode": mode, "filters": {k2: v for k2, v in filters.items() if v}, "results": results}
+            hits = S.search(q, k=k, mode=mode, **filters)
+        except Exception as e:  # e.g. encoder unreachable -> fall back to keyword search, say so
+            hits = S.search(q, k=k, mode="fts", **filters)
+            return {"query": q, "mode": "fts", "warning": f"dense search unavailable: {str(e)[:150]}",
+                    "results": [chunk_payload(c, s) for c, s in hits]}
+        results = []
+        for c, sc in hits:
+            try:
+                results.append(chunk_payload(c, sc))
+            except HTTPException:          # vector index briefly ahead/behind the chunk table during rebuilds
+                continue
+        return {"query": q, "mode": mode, "filters": {k2: v for k2, v in filters.items() if v}, "results": results}
 
 
 @app.get("/api/chunk/{chunk_id}")
@@ -196,7 +295,7 @@ def session(session_id: str):
         f"SELECT session_id FROM Sessions WHERE thread_ids=? AND platform=? AND start_ts {op} ? "
         f"ORDER BY start_ts {order} LIMIT 1", (r["thread_ids"], r["platform"], r["start_ts"])).fetchone()
     prev, nxt = nb("<", "DESC"), nb(">", "ASC")
-    persons, threads = json.loads(r["person_ids"]), json.loads(r["thread_ids"])
+    accts, threads = json.loads(r["account_ids"]), json.loads(r["thread_ids"])
     msgs = [m[0] for m in S.conn.execute("""
         SELECT cm.msg_id FROM ChunkMessages cm JOIN Chunks c USING(chunk_id)
         WHERE c.session_id = ? GROUP BY cm.msg_id ORDER BY MIN(c.start_ts), MIN(cm.position)""", (session_id,))]
@@ -206,8 +305,8 @@ def session(session_id: str):
         "message_ids": msgs,
         "start": iso(r["start_ts"]), "end": iso(r["end_ts"]), "message_count": r["message_count"],
         "summary": json.loads(summ["data"]) if summ else None,
-        "people": [{"node": f"P_{p}", "name": NAMES.get(p, "?")} for p in persons],
-        "nodes": [f"P_{p}" for p in persons] + [f"T_{t}" for t in threads],
+        "people": people_for(accts),
+        "nodes": nodes_for(accts, threads),
         "previous_session": prev["session_id"] if prev else None,
         "next_session": nxt["session_id"] if nxt else None,
     }
@@ -216,11 +315,14 @@ def session(session_id: str):
 @app.get("/api/person")
 @locked
 def person(name: str):
-    return {"query": name, "candidates": person_candidates(name)}
+    return {"query": name, "candidates": candidates(name)}
 
 
 class _Backend:
     """Adapter the agent uses: the same functions as the HTTP endpoints (each takes the DB lock itself)."""
+
+    def prefetch(self, queries):
+        S.prefetch(queries)              # one encoder request for all phrasings, outside the DB lock
 
     def search(self, q, k, person=None, platform=None, since=None, until=None, me_only=False):
         return search(q=q, k=k, platform=platform, person=person, since=since, until=until,
@@ -232,6 +334,10 @@ class _Backend:
     def person(self, name):
         return person(name)["candidates"]
 
+    def resolve(self, ref):
+        with LOCK:
+            return resolve(ref)
+
     def chunk_for_message(self, msg_id):
         with LOCK:
             r = S.conn.execute("SELECT chunk_id FROM ChunkMessages WHERE msg_id = ? LIMIT 1", (msg_id,)).fetchone()
@@ -239,7 +345,10 @@ class _Backend:
 
     def timeline(self, q, k=120, **filters):
         """Month histogram of the top-k hybrid matches for a topic (IST months) + the best hit per busy month."""
-        f = dict(platform=filters.get("platform"), person_id=resolve_person(filters.get("person")),
+        S.prefetch([q])
+        with LOCK:
+            accts = resolve_accounts(filters.get("person"))
+        f = dict(platform=filters.get("platform"), accounts=accts,
                  since=to_ts(filters.get("since")), until=to_ts(filters.get("until"), end=True),
                  me_only=bool(filters.get("me_only")))
         with LOCK:
@@ -287,71 +396,69 @@ def _agent():
     return AGENT
 
 
-DOSSIER_VERSION = "v1"
+DOSSIER_VERSION = "v3"   # v3: dossiers of accounts and of people (groups of accounts)
 _DOSSIER_LOCK = threading.Lock()
 
 
 def _dossier_db():
     c = sqlite3.connect(PROFILE_CACHE)
-    c.execute("CREATE TABLE IF NOT EXISTS Dossiers (person_id INTEGER PRIMARY KEY, version TEXT, stamp TEXT, "
+    c.execute("CREATE TABLE IF NOT EXISTS ScopeDossiers (scope TEXT PRIMARY KEY, version TEXT, stamp TEXT, "
               "data TEXT, built TEXT)")
     return c
 
 
-def _data_stamp():
-    """Changes whenever the archive or the index is rebuilt, so cached dossiers go stale with them."""
-    return "|".join(str(int(p.stat().st_mtime)) if p.exists() else "-" for p in (SRC_DB, INDEX_DB))
-
-
-@app.get("/api/person/{person_id}/dossier")
-def dossier(person_id: int, refresh: bool = False):
-    """A person's dossier, built once and kept in profile_cache.db (Dossiers) until the data changes.
-    ?refresh=true rebuilds it."""
-    stamp = _data_stamp()
+def _dossier(sc, refresh=False):
+    """Stats, monthly activity, themes with example conversations and the busiest chats of a scope (one account,
+    or a person = all their accounts). Cached until the accounts in it, their counts or the summaries change,
+    so attaching an account rebuilds that person's dossier on the next view and nobody else's."""
+    with LOCK:
+        msgs = sum(ACCOUNTS[a]["messages"] for a in sc["account_ids"])
+        n = S.conn.execute("SELECT COUNT(*) FROM SessionSummaries").fetchone()[0]
+    stamp = json.dumps([sorted(sc["account_ids"]), msgs, n, sc["name"]])
     with _DOSSIER_LOCK:
         c = _dossier_db()
-        row = None if refresh else c.execute("SELECT data FROM Dossiers WHERE person_id=? AND version=? AND stamp=?",
-                                             (person_id, DOSSIER_VERSION, stamp)).fetchone()
+        row = None if refresh else c.execute("SELECT data FROM ScopeDossiers WHERE scope=? AND version=? AND stamp=?",
+                                             (sc["scope"], DOSSIER_VERSION, stamp)).fetchone()
         c.close()
     if row:
         return {**json.loads(row[0]), "cached": True}
-    d = _build_dossier(person_id)
+    d = _build_dossier(sc)
     with _DOSSIER_LOCK:
         c = _dossier_db()
-        c.execute("INSERT OR REPLACE INTO Dossiers VALUES (?,?,?,?,?)",
-                  (person_id, DOSSIER_VERSION, stamp, json.dumps(d, ensure_ascii=False),
+        c.execute("INSERT OR REPLACE INTO ScopeDossiers VALUES (?,?,?,?,?)",
+                  (sc["scope"], DOSSIER_VERSION, stamp, json.dumps(d, ensure_ascii=False),
                    dt.datetime.now(IST).isoformat(timespec="minutes")))
         c.commit()
         c.close()
     return {**d, "cached": False}
 
 
-def _build_dossier(person_id: int):
-    """Everything about one person for the viewer: exact stats, monthly activity, themes with example
-    conversations, and the busiest shared chats. Themes are LLM-grouped once and cached."""
+def _build_dossier(sc):
     ag = _agent()
-    prof = ag.profiles.get(person_id)
+    prof = ag.profiles.get(sc["scope"], sc["account_ids"], sc["name"])
     q = lambda sql, args=(): ag.sql.conn.execute(sql, args).fetchall()  # noqa: E731
+    threads = ag.profiles.threads(sc["account_ids"])     # takes ag.sql.lock itself, so not inside the block below
+    tj = json.dumps(threads)            # one parameter: a person can span tens of thousands of chats
     with ag.sql.lock:
-        threads = [r[0] for r in q("SELECT DISTINCT thread_id FROM messages WHERE person_id = ?", (person_id,))]
-        ph = ",".join("?" * len(threads)) or "NULL"
-        months = q(f"""SELECT substr(day,1,7) m, COUNT(*), SUM(is_me) FROM messages
-                       WHERE thread_id IN ({ph}) AND day IS NOT NULL GROUP BY m ORDER BY m""", tuple(threads))
-        chats = q(f"""SELECT thread_id, MAX(thread), MAX(platform), COUNT(*), MIN(day), MAX(day) FROM messages
-                      WHERE thread_id IN ({ph}) GROUP BY thread_id ORDER BY COUNT(*) DESC LIMIT 5""", tuple(threads))
-    themes = []
-    for t in prof.get("themes", [])[:8]:
-        ex = []
-        for sid in t["session_ids"][-3:]:
-            try:
-                s = session(sid)
-                ex.append({"session_id": sid, "date": s["start"][:10], "header": s["header"],
-                           "summary": (s.get("summary") or {}).get("summary")})
-            except HTTPException:
-                pass
-        themes.append({"theme": t["theme"], "description": t["description"], "sessions": t["sessions"],
-                       "examples": ex})
-    return {"person_id": person_id, "node": f"P_{person_id}", "name": prof.get("name"),
+        months = q("""SELECT substr(day,1,7) m, COUNT(*), SUM(is_me) FROM msg_stats
+                      WHERE thread_id IN (SELECT value FROM json_each(?)) AND day IS NOT NULL GROUP BY m ORDER BY m""", (tj,))
+        chats = q("""SELECT thread_id, MAX(thread), MAX(platform), COUNT(*), MIN(day), MAX(day) FROM msg_stats
+                     WHERE thread_id IN (SELECT value FROM json_each(?)) GROUP BY thread_id ORDER BY COUNT(*) DESC LIMIT 5""",
+                  (tj,))
+    shown = prof.get("themes", [])[:8]
+    want = [sid for t in shown for sid in t["session_ids"][-3:]]
+    brief = {}
+    if want:          # only what an example card shows: one query, not a full session() per example
+        with LOCK:
+            for sid, start, end, header, data in S.conn.execute(f"""
+                    SELECT s.session_id, s.start_ts, s.end_ts, s.header, x.data FROM Sessions s
+                    LEFT JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model = ? AND x.prompt_version = ?
+                    WHERE s.session_id IN ({",".join("?" * len(want))})""", (SUMMARY_MODEL, SUMMARY_VERSION, *want)):
+                brief[sid] = {"session_id": sid, "date": iso(start)[:10], "header": ist_header(header, start, end),
+                              "summary": json.loads(data).get("summary") if data else None}
+    themes = [{"theme": t["theme"], "description": t["description"], "sessions": t["sessions"],
+               "examples": [brief[sid] for sid in t["session_ids"][-3:] if sid in brief]} for t in shown]
+    return {"kind": sc["kind"], "id": sc["id"], "node": sc["node"], "name": sc["name"],
             "platforms": prof.get("platforms"), "messages_total": prof.get("messages_total"),
             "messages_by_you": prof.get("messages_by_sarthak"), "messages_by_them": prof.get("messages_by_them"),
             "first_day": prof.get("first_day"), "last_day": prof.get("last_day"),
@@ -362,212 +469,195 @@ def _build_dossier(person_id: int):
             "themes": themes}
 
 
-# ─── Contacts: the humans behind accounts ───────────────────────────────────────────────────────────────
-CONTACTS: ContactStore = None
-
-
-def _person_row(pid):
-    r = S.conn.execute("SELECT person_id, name, is_me, placeholder, platform, message_count FROM Persons "
-                       "WHERE person_id = ?", (pid,)).fetchone()
-    if not r:
-        raise HTTPException(404, f"person {pid} not found (relinked?)")
-    return r
-
-
-def _suggestions(pid, accts, placeholder):
-    """Other people who may be the same human: same normalised name on another platform (MergeCandidates),
-    and for a deleted account, people matching its guessed name. Turned-down pairs are not offered again."""
-    uids = [r[0] for r in S.conn.execute("SELECT user_id FROM PersonAliases WHERE person_id = ?", (pid,))]
-    others = {}
-    for (user_ids,) in S.conn.execute("SELECT user_ids FROM MergeCandidates"):
-        ids = json.loads(user_ids)
-        if set(ids) & set(uids):
-            for (o,) in S.conn.execute(f"SELECT DISTINCT person_id FROM PersonAliases WHERE user_id IN "
-                                       f"({','.join('?' * len(ids))})", ids):
-                others.setdefault(o, "same name on another platform")
-    name = NAMES.get(pid, "")
-    if placeholder and name.endswith("?"):
-        for c in person_candidates(name.rstrip("?").strip(), limit=5):
-            others.setdefault(c["person_id"], f"its name was guessed as {name}")
-    out = []
-    for o, why in others.items():
-        if o in (pid, 1):
+# ─── Accounts and people (docs/accounts-and-people.md) ──────────────────────────────────────────────────
+def _suggestions_for(aid, names, members, person_of):
+    """People/accounts that may be the same human as this account: same normalised name on another platform.
+    Pairs the user turned down, and accounts already in the same person, are left out."""
+    mine = person_of.get(aid)
+    out, seen = [], set()
+    for (ids,) in S.conn.execute("SELECT account_ids FROM MergeCandidates"):
+        ids = json.loads(ids)
+        if aid not in ids:
             continue
-        r = S.conn.execute("SELECT name, platform, message_count, placeholder FROM Persons WHERE person_id = ?",
-                           (o,)).fetchone()
-        if not r or (placeholder and r["placeholder"]):
-            continue
-        if CONTACTS.rejected([a["key"] for a in accts], [a["key"] for a in accounts_of(S.conn, o)]):
-            continue
-        out.append({"person_id": o, "node": f"P_{o}", "name": r["name"], "platform": r["platform"],
-                    "messages": r["message_count"], "why": why})
+        for o in ids:
+            if o == aid or o in seen or (mine and person_of.get(o) == mine) or ACCOUNTS.get(o, {}).get("is_me"):
+                continue
+            seen.add(o)
+            if PEOPLE.rejected([ACCOUNTS[aid]["key"]], [ACCOUNTS[o]["key"]]):
+                continue
+            out.append({**account_row(o, person_of, names), "why": "same name on another platform"})
     return out
 
 
-@app.get("/api/person/{pid}/accounts")
+@app.get("/api/account/{aid}")
 @locked
-def person_accounts(pid: int):
-    p = _person_row(pid)
-    accts = accounts_of(S.conn, pid)
-    # the primary account is the one whose own id the contact carries; it can't be unlinked
-    own = {(r[0], r[1], r[2]): r[3] for r in sqlite3.connect(USER_DB).execute(
-        "SELECT platform, raw_id, chat, person_id FROM PersonIds")} if _has_table("PersonIds") else {}
-    is_primary = lambda a: len(accts) == 1 or (own[a["key"]] == pid if a["key"] in own  # noqa: E731
-                                               else not a["key"][2] and a["method"] not in ("merged", "contact"))
-    return {"person_id": pid, "name": p["name"], "is_me": bool(p["is_me"]), "placeholder": bool(p["placeholder"]),
-            "contact_name": CONTACTS.names().get(pid),
-            "accounts": [{"key": list(a["key"]), "platform": a["platform"], "name": a["name"],
-                          "chat_title": a["chat_title"], "messages": a["messages"],
-                          "primary": is_primary(a)} for a in accts],
-            "suggestions": [] if p["is_me"] else _suggestions(pid, accts, p["placeholder"])}
+def account_info(aid: int):
+    names, members, person_of = people_index()
+    a = account_row(aid, person_of, names)
+    return {**a, "suggestions": [] if a["is_me"] else _suggestions_for(aid, names, members, person_of)}
 
 
-def _has_table(name):
-    return bool(sqlite3.connect(USER_DB).execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+@app.get("/api/account/{aid}/dossier")
+def account_dossier(aid: int, refresh: bool = False):
+    with LOCK:
+        sc = resolve(f"A_{aid}")
+    return _dossier(sc, refresh)
 
 
-def _relink():
-    """Apply the contacts to the live index: people tables, person lists of chunks/sessions, the graph (same
-    layout), and the server's caches. Notes about a person who was folded into a contact move with them."""
-    global NAMES
-    before = {r[0]: r[1] for r in S.conn.execute("SELECT user_id, person_id FROM PersonAliases")}
-    before_pt = {(r[0], r[1]): r[2] for r in S.conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
-    people_before = {r[0]: (r[1], r[2]) for r in S.conn.execute("SELECT person_id, name, message_count FROM Persons")}
-    build_identity.build(S.conn, verbose=False)
-    after = {r[0]: r[1] for r in S.conn.execute("SELECT user_id, person_id FROM PersonAliases")}
-    after_pt = {(r[0], r[1]): r[2] for r in S.conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
-    alive = {r[0] for r in S.conn.execute("SELECT person_id FROM Persons")}
-    moved = {}
-    for old, new in [*((before[u], after.get(u)) for u in before), *((before_pt[k], after_pt.get(k)) for k in before_pt)]:
-        if old not in alive and new is not None:
-            moved.setdefault(old, set()).add(new)
-    if _has_table("Notes"):
-        notes = sqlite3.connect(USER_DB)
-        for old, new in moved.items():
-            if len(new) == 1:
-                notes.execute("UPDATE Notes SET person_id = ? WHERE person_id = ?", (new.pop(), old))
-        notes.commit()
-    people_after = {r[0]: (r[1], r[2]) for r in S.conn.execute("SELECT person_id, name, message_count FROM Persons")}
-    stale = [p for p in people_before.keys() | people_after.keys() if people_before.get(p) != people_after.get(p)]
-    with _DOSSIER_LOCK:                   # cached dossiers of everyone whose accounts changed
-        c = _dossier_db()
-        c.executemany("DELETE FROM Dossiers WHERE person_id = ?", [(p,) for p in stale])
-        c.execute("CREATE TABLE IF NOT EXISTS Profiles (person_id INTEGER, version TEXT, data TEXT, "
-                  "PRIMARY KEY (person_id, version))")
-        c.executemany("DELETE FROM Profiles WHERE person_id = ?", [(p,) for p in stale])   # stats + themes
-        c.commit()
-        c.close()
-    n = refresh_person_lists(S.conn)
-    export_cosmograph.export(S.conn, keep_layout=True)
-    NAMES = {r["person_id"]: r["name"] for r in S.conn.execute("SELECT person_id, name FROM Persons")}
-    for r in S.conn.execute("SELECT chunk_id, person_ids FROM Chunks"):
-        i = S.row.get(r["chunk_id"])
-        if i is not None:
-            S.persons[i] = tuple(json.loads(r["person_ids"]))
-    return n
+@app.get("/api/accounts")
+@locked
+def accounts_search(q: str = "", limit: int = Query(30, le=500), unlinked: bool = False, platform: str = None):
+    """Accounts by name, biggest first; unlinked=true: only accounts that belong to no person."""
+    names, _, person_of = people_index()
+    rows = S.conn.execute("SELECT account_id FROM Accounts WHERE lower(name) LIKE ? AND (? IS NULL OR platform = ?) "
+                          "AND message_count > 0 ORDER BY message_count DESC", (f"%{q.lower()}%", platform, platform)).fetchall()
+    out = []
+    for (aid,) in rows:
+        if unlinked and aid in person_of:
+            continue
+        out.append(account_row(aid, person_of, names))
+        if len(out) >= limit:
+            break
+    return {"accounts": out}
 
 
-class LinkRequest(BaseModel):
-    other: int
+@app.get("/api/people")
+@locked
+def people_list():
+    """Every person with their accounts (also the graph's people layer: each person is drawn linked to these)."""
+    names, members, _ = people_index()
+    out = [person_row(pid, names, members) for pid in names]
+    out.sort(key=lambda p: (not p["is_me"], -p["messages"]))
+    return {"people": out}
 
 
-class KeyRequest(BaseModel):
-    key: list[str]
+@app.get("/api/people/{pid}")
+@locked
+def people_get(pid: int):
+    names, members, person_of = people_index()
+    p = person_row(pid, names, members)
+    sugg, seen = [], set()
+    if pid != ME:
+        for a in p["accounts"]:
+            for s_ in _suggestions_for(a["account_id"], names, members, person_of):
+                if s_["account_id"] not in seen:
+                    seen.add(s_["account_id"])
+                    sugg.append(s_)
+    return {**p, "suggestions": sugg}
+
+
+@app.get("/api/people/{pid}/dossier")
+def people_dossier(pid: int, refresh: bool = False):
+    with LOCK:
+        sc = resolve(f"P_{pid}")
+    if not sc["account_ids"]:
+        return {"kind": "person", "id": pid, "node": f"P_{pid}", "name": sc["name"], "messages_total": 0, "themes": []}
+    return _dossier(sc, refresh)
+
+
+class CreatePerson(BaseModel):
+    name: str
+    account_ids: list[int] = []
+
+
+class AttachAccount(BaseModel):
+    account_id: int
 
 
 class NameRequest(BaseModel):
     name: str
 
 
-def _check_linkable(pid):
-    if _person_row(pid)["is_me"]:
-        raise HTTPException(400, "your own accounts come from identity_map.json, not contacts")
+class RejectRequest(BaseModel):
+    a: int
+    b: int
 
 
-@app.get("/api/contacts")
+def _key(aid):
+    if aid not in ACCOUNTS:
+        raise HTTPException(404, f"account {aid} not found")
+    if ACCOUNTS[aid]["is_me"]:
+        raise HTTPException(400, "your own accounts always belong to you (identity_map.json)")
+    return ACCOUNTS[aid]["key"]
+
+
+@app.post("/api/people")
 @locked
-def contacts():
-    """Everyone the user linked into a contact (with their platforms), and all open same-person suggestions."""
-    out = []
-    for pid in sorted(set(CONTACTS.links().values())):
-        r = S.conn.execute("SELECT name, message_count FROM Persons WHERE person_id = ?", (pid,)).fetchone()
-        accts = accounts_of(S.conn, pid)
-        if r and accts:
-            out.append({"person_id": pid, "name": r["name"], "messages": r["message_count"], "accounts": len(accts),
-                        "platforms": sorted({a["platform"] for a in accts})})
-    seen, matches = set(), []
-    for (user_ids,) in S.conn.execute("SELECT user_ids FROM MergeCandidates"):
-        ids = json.loads(user_ids)
-        pids = sorted({r[0] for r in S.conn.execute(
-            f"SELECT person_id FROM PersonAliases WHERE user_id IN ({','.join('?' * len(ids))})", ids)} - {1})
-        for i, a in enumerate(pids):
-            for b in pids[i + 1:]:
-                if (a, b) in seen:
+def people_create(body: CreatePerson):
+    """A new person, optionally with accounts (each moves out of any other person)."""
+    keys = [_key(a) for a in body.account_ids]
+    pid = PEOPLE.create(body.name, keys)
+    return person_row(pid)
+
+
+@app.post("/api/people/{pid}/accounts")
+@locked
+def people_attach(pid: int, body: AttachAccount):
+    if pid == ME:
+        raise HTTPException(400, "your own accounts come from identity_map.json")
+    names, _, _ = people_index()
+    if pid not in names:
+        raise HTTPException(404, f"person {pid} not found")
+    PEOPLE.attach(pid, _key(body.account_id))
+    return person_row(pid)
+
+
+@app.delete("/api/people/{pid}/accounts/{aid}")
+@locked
+def people_detach(pid: int, aid: int):
+    key = _key(aid)
+    if PEOPLE.person_of(key) != pid:
+        raise HTTPException(404, "that account is not part of this person")
+    PEOPLE.detach(key)
+    return person_row(pid)
+
+
+@app.post("/api/people/{pid}/name")
+@locked
+def people_rename(pid: int, body: NameRequest):
+    if not body.name.strip():
+        raise HTTPException(400, "a name can't be empty")
+    person_row(pid)
+    PEOPLE.rename(pid, body.name)
+    return person_row(pid)
+
+
+@app.delete("/api/people/{pid}")
+@locked
+def people_delete(pid: int):
+    """Remove a person; their accounts stay, just without a person."""
+    person_row(pid)
+    try:
+        PEOPLE.delete(pid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"deleted": pid}
+
+
+@app.get("/api/suggestions")
+@locked
+def suggestions(limit: int = Query(60, le=500)):
+    """Same-name accounts on different platforms that are not yet in the same person, biggest first."""
+    names, members, person_of = people_index()
+    out, seen = [], set()
+    for (ids,) in S.conn.execute("SELECT account_ids FROM MergeCandidates"):
+        ids = [i for i in json.loads(ids) if i in ACCOUNTS and not ACCOUNTS[i]["is_me"]]
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                pa, pb = person_of.get(a), person_of.get(b)
+                if (a, b) in seen or (pa and pa == pb) or PEOPLE.rejected([ACCOUNTS[a]["key"]], [ACCOUNTS[b]["key"]]):
                     continue
                 seen.add((a, b))
-                if CONTACTS.rejected([x["key"] for x in accounts_of(S.conn, a)], [x["key"] for x in accounts_of(S.conn, b)]):
-                    continue
-                pa, pb = (S.conn.execute("SELECT person_id, name, platform, message_count AS messages FROM Persons "
-                                         "WHERE person_id = ?", (p,)).fetchone() for p in (a, b))
-                if pa and pb:
-                    matches.append({"a": dict(pa), "b": dict(pb)})
-    matches.sort(key=lambda m: -(m["a"]["messages"] + m["b"]["messages"]))
-    return {"contacts": out, "matches": matches}
+                out.append({"a": account_row(a, person_of, names), "b": account_row(b, person_of, names)})
+    out.sort(key=lambda m: -(m["a"]["messages"] + m["b"]["messages"]))
+    return {"suggestions": out[:limit]}
 
 
-@app.post("/api/person/{pid}/link")
+@app.post("/api/suggestions/reject")
 @locked
-def link_person(pid: int, body: LinkRequest):
-    """`other` is the same human as `pid`: both become one contact under the older (smaller) person id."""
-    if pid == body.other:
-        raise HTTPException(400, "that is the same person")
-    _check_linkable(pid)
-    _check_linkable(body.other)
-    keep, gone = sorted((pid, body.other))
-    pk, pg = _person_row(keep), _person_row(gone)
-    name = None    # a deleted account takes the name of the real person it is linked to
-    if pk["placeholder"] and not pg["placeholder"]:
-        name = pg["name"]
-    CONTACTS.link(keep, gone, [a["key"] for a in accounts_of(S.conn, keep)],
-                  [a["key"] for a in accounts_of(S.conn, gone)], name=name)
-    _relink()
-    return {"person_id": keep, "node": f"P_{keep}", "name": NAMES.get(keep)}
-
-
-@app.post("/api/person/{pid}/unlink")
-@locked
-def unlink_person(pid: int, body: KeyRequest):
-    key = tuple(body.key)
-    acct = next((a for a in person_accounts.__wrapped__(pid)["accounts"] if tuple(a["key"]) == key), None)
-    if not acct:
-        raise HTTPException(404, "that account is not part of this person")
-    if acct["primary"]:
-        raise HTTPException(400, "this is the contact's main account; unlink the others instead")
-    CONTACTS.unlink(key)
-    _relink()
-    split = next((a for a in S.conn.execute("SELECT person_id FROM PersonThreads pt JOIN src.Threads t ON "
-                  "t.id = pt.thread_id JOIN src.Users u ON u.id = pt.user_id WHERE u.platform=? AND u.raw_id=? "
-                  "AND t.platform_thread_id=?", key)), None) if key[2] else S.conn.execute(
-        "SELECT a.person_id FROM PersonAliases a JOIN src.Users u ON u.id = a.user_id WHERE u.platform=? "
-        "AND u.raw_id=?", key[:2]).fetchone()
-    return {"person_id": pid, "unlinked_person_id": split[0] if split else None}
-
-
-@app.post("/api/person/{pid}/name")
-@locked
-def name_person(pid: int, body: NameRequest):
-    _check_linkable(pid)
-    CONTACTS.rename(pid, body.name, [a["key"] for a in accounts_of(S.conn, pid)])
-    _relink()
-    return {"person_id": pid, "name": NAMES.get(pid)}
-
-
-@app.post("/api/person/{pid}/reject")
-@locked
-def reject_person(pid: int, body: LinkRequest):
+def suggestions_reject(body: RejectRequest):
     """Not the same human: stop suggesting this pair."""
-    CONTACTS.reject([a["key"] for a in accounts_of(S.conn, pid)], [a["key"] for a in accounts_of(S.conn, body.other)])
+    PEOPLE.reject([_key(body.a)], [_key(body.b)])
     return {"ok": True}
 
 
@@ -642,18 +732,19 @@ def commitments_ics():
 def _sessions_on(where, args, limit):
     with LOCK:
         rows = S.conn.execute(f"""
-            SELECT s.session_id, s.header, s.platform, s.start_ts, s.message_count, s.person_ids, s.thread_ids, x.data
+            SELECT s.session_id, s.header, s.platform, s.start_ts, s.message_count, s.account_ids, s.thread_ids, x.data
             FROM Sessions s LEFT JOIN SessionSummaries x ON x.session_id = s.session_id
                  AND x.model = ? AND x.prompt_version = ?
             WHERE s.me_involved = 1 AND {where} ORDER BY s.message_count DESC LIMIT ?""",
                               (SUMMARY_MODEL, SUMMARY_VERSION, *args, limit)).fetchall()
     out = []
+    _, _, person_of = people_index()
     for r in rows:
         summ = json.loads(r["data"]).get("summary") if r["data"] else None
         out.append({"session_id": r["session_id"], "header": ist_header(r["header"], r["start_ts"], r["start_ts"]),
                     "platform": r["platform"], "time": dt.datetime.fromtimestamp(r["start_ts"], IST).strftime("%Y-%m-%d %H:%M"),
                     "messages": r["message_count"], "summary": summ,
-                    "nodes": [f"P_{p}" for p in json.loads(r["person_ids"])] + [f"T_{t}" for t in json.loads(r["thread_ids"])]})
+                    "nodes": nodes_for(json.loads(r["account_ids"]), json.loads(r["thread_ids"]), person_of)})
     return out
 
 
@@ -736,7 +827,7 @@ def viewer():
 
 @app.middleware("http")
 async def revalidate_graph(request, call_next):
-    """Graph files change when people are linked; make browsers revalidate them (cheap 304 via ETag)."""
+    """Graph files change on rebuilds; make browsers revalidate them (cheap 304 via ETag)."""
     resp = await call_next(request)
     if request.url.path.startswith("/processed_data/graph"):
         resp.headers["Cache-Control"] = "no-cache"
@@ -753,11 +844,22 @@ if __name__ == "__main__":
     a = ap.parse_args()
     S = Searcher(a.model, "ctx", encoder_url=os.environ.get("EMBED_URL"))
     S.conn = connect_index(check_same_thread=False)
-    NAMES = {r["person_id"]: r["name"] for r in S.conn.execute("SELECT person_id, name FROM Persons")}
-    CONTACTS = ContactStore()
-    # a hand-written person_merges.json already applied to a prebuilt index (e.g. the demo) becomes contacts
-    CONTACTS.import_merges(DATA_DIR / "person_merges.json", lambda p, r: (S.conn.execute(
-        "SELECT a.person_id FROM PersonAliases a JOIN src.Users u ON u.id = a.user_id WHERE u.platform=? AND u.raw_id=?",
-        (p, r)).fetchone() or [None])[0])
+    for r in S.conn.execute("SELECT account_id, name, platform, raw_id, chat, is_me, placeholder, message_count "
+                            "FROM Accounts"):
+        key = (r["platform"], r["raw_id"], r["chat"])
+        NAMES[r["account_id"]] = r["name"]
+        KEY2AID[key] = r["account_id"]
+        ACCOUNTS[r["account_id"]] = {"key": key, "platform": r["platform"], "is_me": bool(r["is_me"]),
+                                     "placeholder": bool(r["placeholder"]), "messages": r["message_count"]}
+    from common import IDENTITY_MAP
+    PEOPLE = PeopleStore(USER_DB, json.load(open(IDENTITY_MAP)).get("master_persona", "Me"))
+    PEOPLE.import_merges(DATA_DIR / "person_merges.json")      # a hand-written list, imported once
     print(f"Data: {DATA_DIR} | {len(S.ids)} chunks | encoder: {S.encoder_url or 'local ' + a.model + ' model'}")
+
+    def _warm():          # your own dossier spans the whole archive (~40s to build): have it ready, not on first click
+        try:
+            people_dossier(ME)
+        except Exception as e:
+            print(f"[warm-up] your dossier: {type(e).__name__}: {e}")
+    threading.Thread(target=_warm, daemon=True).start()
     uvicorn.run(app, host="127.0.0.1", port=a.port)

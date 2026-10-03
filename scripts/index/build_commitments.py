@@ -45,10 +45,11 @@ CREATE TABLE Commitments (
 def main(tag=None):
     client = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
     conn = connect_index()
-    names = {r[0]: r[1] for r in conn.execute("SELECT person_id, name FROM Persons")}
+    names = {r[0]: r[1] for r in conn.execute("SELECT account_id, name FROM Accounts")}
+    mine = {r[0] for r in conn.execute("SELECT account_id FROM Accounts WHERE is_me = 1")}
     items = []
     for sid, data, ts, plat, pids, tids in conn.execute("""
-            SELECT x.session_id, x.data, s.start_ts, s.platform, s.person_ids, s.thread_ids
+            SELECT x.session_id, x.data, s.start_ts, s.platform, s.account_ids, s.thread_ids
             FROM SessionSummaries x JOIN Sessions s USING(session_id)
             WHERE x.model = 'deepseek-flash' AND x.prompt_version = 'v3' AND (? IS NULL OR x.tag = ?)""",
             (tag, tag)):
@@ -86,8 +87,8 @@ def main(tag=None):
                 cid = hashlib.sha1(f"{it['sid']}|{it['what']}".encode()).hexdigest()[:16]
                 rows.append((cid, it["sid"], "me" if o.get("owner") == "me" else "them", it.get("who"),
                              (o.get("title") or it["what"])[:120], it["what"], due, it["day"], it["platform"],
-                             json.dumps([names.get(p, "?") for p in it["pids"] if p != 1]),
-                             json.dumps([f"P_{p}" for p in it["pids"]] + [f"T_{t}" for t in it["tids"]])))
+                             json.dumps([names.get(p, "?") for p in it["pids"] if p not in mine]),
+                             json.dumps([f"A_{p}" for p in it["pids"]] + [f"T_{t}" for t in it["tids"]])))
     if tag is None:                     # full rebuild; with --tag the new rows are added to the existing inbox
         conn.executescript(SCHEMA)
     conn.executemany("INSERT OR REPLACE INTO Commitments VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)

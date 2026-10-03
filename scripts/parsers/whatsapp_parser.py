@@ -50,8 +50,8 @@ def load_contacts(path):
             line = line.strip()
             if line.startswith("BEGIN:VCARD"):
                 name = None
-            elif line.startswith("FN:"):
-                name = line[3:].strip()
+            elif line.startswith("FN:"):   # vCard escapes: \, \; \\ \n
+                name = re.sub(r"\\(.)", lambda m: " " if m.group(1) in "nN" else m.group(1), line[3:]).strip()
             elif line.upper().startswith("TEL") and name:
                 digits = re.sub(r"\D", "", line.split(":", 1)[-1])
                 if len(digits) >= 10:

@@ -42,10 +42,11 @@ def main(a):
     client = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
     conn = connect_index()
     rows = conn.execute("""
-        SELECT pt.user_id, pt.thread_id, p.message_count FROM PersonThreads pt
-        JOIN Persons p ON p.person_id = pt.person_id
-        WHERE p.message_count >= ? ORDER BY p.message_count DESC""", (a.min_messages,)).fetchall()
-    me_users = {r[0] for r in conn.execute("SELECT user_id FROM PersonAliases WHERE person_id = 1")}
+        SELECT at.user_id, at.thread_id, ac.message_count FROM AccountThreads at
+        JOIN Accounts ac ON ac.account_id = at.account_id
+        WHERE ac.message_count >= ? ORDER BY ac.message_count DESC""", (a.min_messages,)).fetchall()
+    me_users = {r[0] for r in conn.execute("""SELECT au.user_id FROM AccountUsers au
+        JOIN Accounts ac ON ac.account_id = au.account_id WHERE ac.is_me = 1""")}
     rng = random.Random(3)
     found = 0
     conn.execute("DELETE FROM PersonNameGuesses")

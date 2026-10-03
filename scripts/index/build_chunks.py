@@ -20,7 +20,7 @@ import json
 import re
 from collections import defaultdict
 
-from common import connect_index, snowflake_to_unix
+from common import IDENTITY_MAP, connect_index, snowflake_to_unix
 
 try:
     import tiktoken
@@ -42,7 +42,7 @@ CREATE TABLE Sessions (
     session_id TEXT PRIMARY KEY,
     platform TEXT, structure TEXT,
     thread_ids TEXT,              -- JSON list of src.Threads.id
-    person_ids TEXT,              -- JSON list, ordered by message count
+    account_ids TEXT,             -- JSON list of Accounts.account_id, ordered by message count
     start_ts INTEGER, end_ts INTEGER,
     message_count INTEGER, token_count INTEGER,
     me_involved INTEGER,          -- 1 if I sent any message in the session
@@ -52,7 +52,7 @@ CREATE TABLE Chunks (
     chunk_id TEXT PRIMARY KEY,
     session_id TEXT REFERENCES Sessions(session_id),
     platform TEXT, structure TEXT,
-    thread_ids TEXT, person_ids TEXT,
+    thread_ids TEXT, account_ids TEXT,
     start_ts INTEGER, end_ts INTEGER,
     message_count INTEGER, token_count INTEGER,
     ego_weight REAL,              -- share of tokens written by me
@@ -124,10 +124,64 @@ class UnionFind:
             self.p[ra] = rb
 
 
+NAME_CAP = 40   # characters of a person's name in chunk text; some address-book "names" are whole notes
+
+
+def short_name(name, frozen=None):
+    """A renamed person's new name, capped for chunk text. Names that never changed are kept as they are,
+    so text that was already embedded stays identical."""
+    if name == frozen or len(name) <= NAME_CAP:
+        return name
+    cut = name[:NAME_CAP].rsplit(" ", 1)[0] if " " in name[:NAME_CAP] else name[:NAME_CAP]
+    return cut.rstrip(" ,;:-(") + "…"
+
+
+ME_LAYOUT = 1    # the owner's accounts lay out as one author, as before accounts were kept apart
+
+
+def layout_key(account, is_me):
+    return ME_LAYOUT if account in is_me else account
+
+
+def layout_names(conn, is_me, me_name):
+    """Name each account had when its conversations were first chunked and summarized (SummaryLabels, keyed by
+    layout key: the account id, or ME_LAYOUT for all of the owner's accounts).
+
+    Chunk boundaries are measured in tokens of the rendered lines, which include names, so renaming someone
+    (contacts, a phone address book) would move boundaries, change chunk/session ids and orphan their paid
+    summaries and vectors. Lines are laid out with this frozen name and shown with the current one.
+    People seen for the first time get their current name recorded."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS SummaryLabels (
+        person_id INTEGER, label TEXT, PRIMARY KEY (person_id, label))""")
+    conn.execute("""INSERT INTO SummaryLabels SELECT account_id, name FROM Accounts
+                    WHERE is_me = 0 AND account_id NOT IN (SELECT person_id FROM SummaryLabels)""")
+    conn.execute("INSERT OR IGNORE INTO SummaryLabels SELECT ?, ? WHERE NOT EXISTS "
+                 "(SELECT 1 FROM SummaryLabels WHERE person_id = ?)", (ME_LAYOUT, me_name, ME_LAYOUT))
+    conn.commit()
+    frozen = {}
+    for pid, label in conn.execute("SELECT person_id, label FROM SummaryLabels ORDER BY rowid"):
+        frozen.setdefault(pid, label)
+    return frozen
+
+
+def owner(conn):
+    """The owner's account ids and the name they are shown under in chunk text (identity_map master_persona)."""
+    with open(IDENTITY_MAP) as f:
+        me_name = json.load(f).get("master_persona", "Me")
+    return {r[0] for r in conn.execute("SELECT account_id FROM Accounts WHERE is_me = 1")}, me_name
+
+
+def display_names(conn, is_me, me_name):
+    """Account names as chunk text shows them; the owner's accounts all read as the owner."""
+    return {a: (me_name if a in is_me else n) for a, n in conn.execute("SELECT account_id, name FROM Accounts")}
+
+
 def load(conn):
-    person_of = {r["user_id"]: r["person_id"] for r in conn.execute("SELECT user_id, person_id FROM PersonAliases")}
-    per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, person_id FROM PersonThreads")}
-    person_name = {r["person_id"]: r["name"] for r in conn.execute("SELECT person_id, name FROM Persons")}
+    account_of = {r[0]: r[1] for r in conn.execute("SELECT user_id, account_id FROM AccountUsers")}
+    per_chat = {(r[0], r[1]): r[2] for r in conn.execute("SELECT user_id, thread_id, account_id FROM AccountThreads")}
+    is_me, me_name = owner(conn)
+    shown = display_names(conn, is_me, me_name)
+    frozen = layout_names(conn, is_me, me_name)
     threads = {r["id"]: dict(r) for r in conn.execute("SELECT id, platform, title FROM src.Threads")}
     msgs, skips, recovered = {}, [], 0
     for r in conn.execute(
@@ -143,11 +197,13 @@ def load(conn):
         if text is None:
             skips.append((r["msg_id"], "empty"))
             continue
-        pid = per_chat.get((r["author_id"], r["thread_id"]), person_of.get(r["author_id"]))
+        aid = per_chat.get((r["author_id"], r["thread_id"]), account_of.get(r["author_id"]))
+        pid = layout_key(aid, is_me)
         msgs[r["msg_id"]] = {
             "id": r["msg_id"], "thread": r["thread_id"], "ts": ts, "text": text,
-            "parent": r["parent_msg_id"], "person": pid,
-            "name": person_name.get(pid, "unknown"),
+            "parent": r["parent_msg_id"], "person": pid, "account": aid,     # person: layout key (see layout_key)
+            "name": frozen.get(pid, shown.get(aid, "unknown")),             # lays out lines (see layout_names)
+            "display": short_name(shown.get(aid, "unknown"), frozen.get(pid)),   # shown in chunk text
         }
     print(f"Loaded {len(msgs)} messages ({recovered} timestamps recovered from tweet IDs, {len(skips)} skipped)")
     return msgs, threads, skips
@@ -275,11 +331,19 @@ def windows(units, target, overlap):
     return out
 
 
+def shown(unit):
+    """A unit's line with the author's current name in place of the frozen layout name."""
+    m = unit["msgs"][0]
+    if m["name"] == m["display"]:
+        return unit["line"]
+    return unit["line"].replace(f"] {m['name']}: ", f"] {m['display']}: ", 1)
+
+
 def ancestor_head(unit, by_id, cap):
     chain, m = [], unit["msgs"][0]
     while m["parent"] in by_id and len(chain) < 6:
         m = by_id[m["parent"]]
-        chain.append(f"{m['name']}: {m['text']}")
+        chain.append(f"{m['display']}: {m['text']}")
     if not chain:
         return ""
     head = " ← ".join(chain)
@@ -305,7 +369,7 @@ def header_for(platform, structure, threads_meta, person_ids, names, start, end)
 def people_by_volume(msgs):
     count = defaultdict(int)
     for m in msgs:
-        count[m["person"]] += 1
+        count[m["account"]] += 1
     return sorted(count, key=lambda p: -count[p])
 
 
@@ -313,7 +377,9 @@ def build(gap_min, target, overlap):
     conn = connect_index()
     conn.executescript(SCHEMA)
     msgs, threads, skips = load(conn)
-    names = {r["person_id"]: r["name"] for r in conn.execute("SELECT person_id, name FROM Persons")}
+    is_me, me_name = owner(conn)
+    frozen = layout_names(conn, is_me, me_name)
+    names = {a: short_name(n, frozen.get(layout_key(a, is_me))) for a, n in display_names(conn, is_me, me_name).items()}
     convs = group_conversations(msgs, threads)
 
     sess_rows, chunk_rows, cm_rows = [], [], []
@@ -341,22 +407,23 @@ def build(gap_min, target, overlap):
             start, end = min(m["ts"] for m in smsgs), max(m["ts"] for m in smsgs)
             s_header = header_for(platform, structure, [threads[t] for t in tids], pids, names, start, end)
             s_text = "\n".join(u["line"] for u in sess_units)
+            s_shown = "\n".join(shown(u) for u in sess_units)
             sid = stable_id("s_", s_ids)
-            me_involved = int(1 in pids)
+            me_involved = int(bool(is_me & set(pids)))
             sess_rows.append((sid, platform, structure, json.dumps(tids), json.dumps(pids), start, end,
-                              len(smsgs), ntok(s_text), me_involved, s_header, s_text))
+                              len(smsgs), ntok(s_text), me_involved, s_header, s_shown))
 
             for w_idx, win in enumerate(windows(sess_units, target, 0 if by_id else overlap)):
                 wmsgs = list({m["id"]: m for u in win for m in u["msgs"]}.values())
                 w_ids = [m["id"] for m in wmsgs]
-                body = "\n".join(u["line"] for u in win)
+                body = "\n".join(shown(u) for u in win)
                 if by_id:
                     body = ancestor_head(win[0], by_id, HEAD_CAP) + body
                 wp = people_by_volume(wmsgs)
                 ws, we = min(m["ts"] for m in wmsgs), max(m["ts"] for m in wmsgs)
                 w_header = header_for(platform, structure, [threads[t] for t in sorted({m["thread"] for m in wmsgs})],
                                       wp, names, ws, we)
-                tok_by_me = sum(u["tok"] for u in win if u["msgs"][0]["person"] == 1)
+                tok_by_me = sum(u["tok"] for u in win if u["msgs"][0]["person"] == ME_LAYOUT)
                 total = sum(u["tok"] for u in win) or 1
                 wtok = ntok(body)
                 content_tok = sum(ntok(m["text"]) for m in wmsgs)

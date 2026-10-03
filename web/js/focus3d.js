@@ -20,6 +20,16 @@ const chatName = (label, platform) => /^tweet thread \d+/i.test(label || '') ? '
   : /^reddit (thread|post) /i.test(label || '') ? 'Reddit thread' : (label || platformLabel(platform));
 
 // ─── builders: turn app data into a scene spec {nodes, links} ──────────────────
+// who to show for a set of node ids: people (P_), and accounts (A_) that belong to no person in the set;
+// never me or my own accounts (I'm the centre of every scene)
+function whoIn(ids, graph, meId) {
+  const set = new Set(ids), out = [];
+  for (const x of ids) {
+    if (x === meId || graph.isMine(x)) continue;
+    if (x.startsWith('P_') || (x.startsWith('A_') && !set.has(graph.personOfNode(x)))) out.push(x);
+  }
+  return out;
+}
 export function specFromSources(sources, graph) {
   const nodes = new Map(), links = [];
   const add = (id, n) => { if (!nodes.has(id)) nodes.set(id, { id, ...n }); return id; };
@@ -32,7 +42,7 @@ export function specFromSources(sources, graph) {
       kind: 'session', platform: s.platform, label: s.n != null ? String(s.n) : shortDate(s.date),
       title: sessionTitle(s.header), date: s.date, snippet: s.snippet, session: s.session_id, n: s.n,
     });
-    const people = s.nodes.filter(x => x.startsWith('P_') && x !== meId).slice(0, 6);
+    const people = whoIn(s.nodes, graph, meId).slice(0, 6);
     const chats = s.nodes.filter(x => x.startsWith('T_')).slice(0, 2);
     for (const t of chats) {
       const info = graph.infoById(t);
@@ -42,7 +52,7 @@ export function specFromSources(sources, graph) {
     }
     for (const p of people) {
       const info = graph.infoById(p);
-      add(p, { kind: 'person', platform: info?.platform || s.platform, label: cleanName(info?.label || '?'), size: info?.size, pid: +p.slice(2) });
+      add(p, { kind: 'person', platform: info?.platform || s.platform, label: cleanName(info?.label || '?'), size: info?.size, ref: p });
       if (chats.length) chats.forEach(t => links.push([t, p])); else links.push([p, sid]);
       links.push([meId, p]);
     }
@@ -53,12 +63,12 @@ export function specFromSources(sources, graph) {
 
 export function specFromNodes(ids, graph) {
   const meId = graph.meId, nodes = [{ id: meId, kind: 'me', label: 'You' }], links = [];
-  const people = ids.filter(x => x.startsWith('P_') && x !== meId).slice(0, 24);
+  const people = whoIn(ids, graph, meId).slice(0, 24);
   const chats = ids.filter(x => x.startsWith('T_')).slice(0, 24);
   for (const p of people) {
     const info = graph.infoById(p);
     if (!info) continue;
-    nodes.push({ id: p, kind: 'person', platform: info.platform, label: cleanName(info.label), size: info.size, pid: +p.slice(2) });
+    nodes.push({ id: p, kind: 'person', platform: info.platform, label: cleanName(info.label), size: info.size, ref: p });
     links.push([meId, p]);
   }
   const has = new Set(nodes.map(n => n.id));
@@ -87,7 +97,7 @@ export function specFromPerson(d, graph) {
   const meId = graph.meId, pid = d.node, info = graph.infoById(pid);
   const nodes = [
     { id: meId, kind: 'me', label: 'You' },
-    { id: pid, kind: 'person', platform: info?.platform, label: cleanName(d.name), size: d.messages_total, pid: d.person_id },
+    { id: pid, kind: 'person', platform: info?.platform, label: cleanName(d.name), size: d.messages_total, ref: d.node },
   ];
   const links = [[meId, pid]];
   for (const c of d.top_chats.slice(0, 5)) {
@@ -96,7 +106,7 @@ export function specFromPerson(d, graph) {
     links.push([pid, c.node]);
   }
   d.themes.slice(0, 6).forEach((t, k) => {
-    const tid = `TH_${d.person_id}_${k}`;
+    const tid = `TH_${d.node}_${k}`;
     nodes.push({ id: tid, kind: 'theme', label: t.theme, title: t.description, size: t.sessions });
     links.push([pid, tid]);
     for (const e of t.examples) {

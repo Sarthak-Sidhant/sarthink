@@ -1208,7 +1208,7 @@
       clearTimeout(S._toastTimer);
       S._toastTimer = setTimeout(() => $('toast').classList.remove('show'), 5000);
       showRelations(idx);
-      if (n.id.startsWith('P_') && n.group !== 'me') openDossier(n.id.slice(2));
+      if (n.id.startsWith('A_') && !n.group.endsWith('_me')) openDossier(n.id);   // an account
     }
 
     function showRelations(nodeIdx) {
@@ -1795,7 +1795,7 @@
       for (let i = 0; i < N; i++) {
         const n = S.nodes[i], label = n.label.toLowerCase();
         if (!label.includes(q)) continue;
-        const person = n.group === 'me' || n.group.endsWith('_user');
+        const person = n.group === 'me' || n.group.endsWith('_user') || n.group.endsWith('_me');
         const score = (person ? 2 : 0) + (label === q || label === '@' + q || label === 'u/' + q ? 4 : 0)
                       + Math.log10((parseInt(n.size) || 1) + 1) / 10;
         if (score > bestScore) { bestScore = score; best = i; }
@@ -1932,7 +1932,7 @@
     // Light up a set of graph nodes (cited people + conversations), draw their links, frame them with the camera.
     function highlightNodes(nodeIds, { fly = true } = {}) {
       if (S.searchIsolated) restoreSearchLayout();
-      const me = S.nodes.find(n => n.group === 'me');
+      const me = S.nodes.find(n => n.group === 'me' || n.group.endsWith('_me'));
       const idxs = new Set();
       nodeIds.forEach(id => { const n = S.nodeById[id]; if (n && n.index !== undefined) idxs.add(n.index); });
       if (!idxs.size) return;
@@ -2203,12 +2203,14 @@
     }
 
     // ─── Person dossier ───────────────────────────────────────────────────────
+    // ref: an account (A_<id>) or a person (P_<id>); see docs/accounts-and-people.md
+    const dossierUrl = ref => ref.startsWith('P_') ? `/api/people/${ref.slice(2)}` : `/api/account/${ref.replace(/^A_/, '')}`;
     async function openDossier(pid) {
       $('dossier').classList.add('show');
       $('ds-name').firstChild.textContent = 'Loading…';
       $('ds-sub').textContent = ''; $('ds-body').innerHTML = '<div class="msg hint">Reading your history together…</div>';
       try {
-        const d = await (await fetch(`/api/person/${pid}/dossier`)).json();
+        const d = await (await fetch(`${dossierUrl(pid)}/dossier`)).json();
         $('ds-name').firstChild.textContent = d.name;
         $('ds-sub').textContent = `${d.platforms || ''} · ${d.first_day || '?'} → ${d.last_day || '?'}`;
         const pct = d.messages_total ? Math.round(100 * d.messages_by_you / d.messages_total) : 0;
@@ -2242,56 +2244,15 @@
       } catch (e) { $('ds-body').innerHTML = `<span style="color:#ff8080">Could not load: ${esc(e.message)}</span>`; }
     }
 
-    // Accounts behind a person: link the same human across platforms (incl. deleted accounts), unlink, rename.
-    // Every change relinks the index on the server; the page then reloads to redraw the graph.
-    const acctLabel = a => a.chat_title !== null && a.key[2]
-      ? `<b>${esc(a.platform)}</b> deleted account <i>in “${esc(a.chat_title)}”</i>`
-      : `<b>${esc(a.platform)}</b> ${esc(a.name)}`;
-    async function renderAccounts(pid) {
-      const box = $('ds-accts'); if (!box) return;
-      const d = await (await fetch(`/api/person/${pid}/accounts`)).json();
-      if (d.is_me) return;
-      const rows = d.accounts.map((a, i) => `<div class="ds-acct"><span class="w">${acctLabel(a)} <i>· ${a.messages} msgs</i></span>
-        ${a.primary ? '' : `<button class="btn" data-unlink="${i}" title="Not the same person: split this account off">Unlink</button>`}</div>`).join('');
-      const sugs = d.suggestions.map(s => `<div class="ds-acct sug"><span class="w"><b>${esc(s.name)}</b> <i>· ${esc(s.platform)} · ${s.messages} msgs · ${esc(s.why)}</i></span>
-        <button class="btn" data-link="${s.person_id}">Same person</button><button class="btn" data-reject="${s.person_id}">Not them</button></div>`).join('');
-      box.innerHTML = `<div class="ds-h">ACCOUNTS<span class="ds-link" id="ds-rename">rename</span></div>${rows}
-        ${sugs ? `<div class="ds-h" style="margin-top:8px">SAME PERSON?</div>${sugs}` : ''}
-        <input id="ds-find" placeholder="Link another account of ${esc(d.name)}… (type a name)"><div id="ds-found"></div>`;
-      const act = async (url, body, msg) => {
-        box.innerHTML = `<div class="msg hint">${msg}…</div>`;
-        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-        const j = await r.json();
-        if (!r.ok) { box.innerHTML = `<span style="color:#ff8080">${esc(j.detail || 'failed')}</span>`; return; }
-        location.hash = 'person=' + (j.person_id ?? pid); location.reload();
-      };
-      let t;
-      $('ds-find').oninput = e => {
-        clearTimeout(t);
-        const q = e.target.value.trim();
-        t = setTimeout(async () => {
-          if (q.length < 2) { $('ds-found').innerHTML = ''; return; }
-          const c = (await (await fetch(`/api/person?name=${encodeURIComponent(q)}`)).json()).candidates
-            .filter(c => !c.is_me && c.person_id !== +pid);
-          $('ds-found').innerHTML = c.map(c => `<div class="ds-acct"><span class="w"><b>${esc(c.name)}</b> <i>· ${esc(c.platform || '')} · ${c.messages} msgs</i></span>
-            <button class="btn" data-link="${c.person_id}">Link</button></div>`).join('') || '<div class="legend">No one by that name</div>';
-        }, 250);
-      };
-      box.onclick = e => {
-        e.stopPropagation();
-        const b = e.target.dataset;
-        if (e.target.id === 'ds-rename') {
-          const n = prompt(`Name for this person (shown everywhere instead of account names):`, d.contact_name || d.name);
-          if (n !== null) act(`/api/person/${pid}/name`, { name: n }, 'Renaming');
-        } else if (b.link) {
-          act(`/api/person/${pid}/link`, { other: +b.link }, 'Linking');
-        } else if (b.unlink) {
-          act(`/api/person/${pid}/unlink`, { key: d.accounts[+b.unlink].key }, 'Unlinking');
-        } else if (b.reject) {
-          fetch(`/api/person/${pid}/reject`, { method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ other: +b.reject }) }).then(() => renderAccounts(pid));
-        }
-      };
+    // Which person this account belongs to. Grouping accounts into people happens in the web app's People page.
+    async function renderAccounts(ref) {
+      const box = $('ds-accts'); if (!box || !ref.startsWith('A_')) return;
+      const a = await (await fetch(dossierUrl(ref))).json();
+      if (a.is_me) return;
+      const app = (location.port === '8000' ? `http://${location.hostname}:8080` : '') + `/#people/${ref}`;
+      box.innerHTML = `<div class="ds-h">PERSON</div><div class="ds-acct"><span class="w">${a.person
+        ? `Part of <b>${esc(a.person)}</b>` : 'Not part of a person yet'}</span>
+        <a class="btn" href="${app}" target="_blank" rel="noopener">${a.person ? 'Open' : 'Group'} in People ↗</a></div>`;
     }
     function closeDossier() { $('dossier').classList.remove('show'); }
 
@@ -2362,7 +2323,7 @@
       setTimeout(() => { $('loading').style.display = 'none'; }, 800);
 
       renderLoop();
-      const m = location.hash.match(/person=(\d+)/);       // reopened after linking/unlinking accounts
+      const m = location.hash.match(/person=([AP]_\d+)/);     // a link to one account or person
       if (m) { history.replaceState(null, '', location.pathname); openDossier(m[1]); }
     }
 

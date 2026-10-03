@@ -38,6 +38,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._proxy() if self.path.startswith(PROXY_PREFIXES) else self.send_error(405)
 
+    def do_DELETE(self):          # people: remove an account from a person, remove a person
+        self._proxy() if self.path.startswith(PROXY_PREFIXES) else self.send_error(405)
+
     def _static(self):
         rel = urlsplit(self.path).path.lstrip("/") or "index.html"
         f = (WEB / rel).resolve()

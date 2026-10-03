@@ -3,9 +3,13 @@
 // flat map is just the 3D view looked at straight down its narrowest axis, so the two morph smoothly.
 // The bulk of the graph (~100k nodes and edges) draws with WebGL, so every frame is cheap; a 2D canvas
 // on top draws only what needs text or emphasis: "you", highlighted nodes, hover ring and labels.
+// Accounts and chats come from the graph files (rebuilt on import); people (groups of accounts, see
+// docs/accounts-and-people.md) are a layer on top: one node per person at the centre of their accounts, linked
+// to each. setPeople() rebuilds just that layer, so linking an account shows up at once.
 import { css, esc, num, platformOf, platformLabel, cleanName } from './util.js';
 
-const PERSON_GROUPS = /_user$|^me$/;
+const PERSON_GROUPS = /_user$|_me$|^me$|^person$/;   // drawn as people-sized nodes: accounts, my accounts, people
+const ME_PERSON = 'P_1';
 const ANGLE_3D = { yaw: 0.55, pitch: -0.5, p: 1 };   // the tilt the map swings to when 3D is turned on
 
 // ─── tiny CSV reader (quoted fields, "" escapes, newlines inside quotes) ──────
@@ -135,69 +139,114 @@ export class Graph {
   }
 
   // ─── data ────────────────────────────────────────────────────────────────
-  async load(nodesUrl, edgesUrl) {
+  async load(nodesUrl, edgesUrl, people = []) {
     if (!this.gl) throw new Error('this browser has WebGL turned off');
     const [N, E] = await Promise.all([fetchCSV(nodesUrl), fetchCSV(edgesUrl)]);
-    const n = this.n = N.rows.length, c = N.col;
-    this.ids = new Array(n); this.labels = new Array(n); this.groups = new Array(n); this.plat = new Array(n);
-    this.size = new Float32Array(n); this.x = new Float32Array(n); this.y = new Float32Array(n);
-    this.isPerson = new Uint8Array(n); this.index = new Map();
-    const P = new Float64Array(n * 3);
-    this.col3 = new Float32Array(n * 3); this.platRaw = {};
+    const n = N.rows.length, c = N.col;
+    const B = this.base = {
+      n, ids: new Array(n), labels: new Array(n), groups: new Array(n), plat: new Array(n), size: new Float32Array(n),
+      col3: new Float32Array(n * 3), P: new Float64Array(n * 3), index: new Map(), platRaw: {},
+    };
     for (let i = 0; i < n; i++) {
       const d = N.rows[i];
-      const c3 = rgba(d[c.color] || '#8899aa'); this.col3.set(c3.slice(0, 3), i * 3);
-      this.ids[i] = d[c.id]; this.labels[i] = d[c.label]; this.groups[i] = d[c.group];
-      this.size[i] = +d[c.size] || 1;
-      this.isPerson[i] = PERSON_GROUPS.test(d[c.group]) ? 1 : 0;
-      this.plat[i] = platformOf(d[c.group]);
-      if (this.isPerson[i] && !this.platRaw[this.plat[i]]) this.platRaw[this.plat[i]] = d[c.color];
-      P[i * 3] = +d[c.layout_x] || 0; P[i * 3 + 1] = +d[c.layout_y] || 0; P[i * 3 + 2] = +d[c.layout_z] || 0;
-      this.index.set(d[c.id], i);
+      B.col3.set(rgba(d[c.color] || '#8899aa').slice(0, 3), i * 3);
+      B.ids[i] = d[c.id]; B.labels[i] = d[c.label]; B.groups[i] = d[c.group];
+      B.size[i] = +d[c.size] || 1;
+      B.plat[i] = platformOf(d[c.group]);
+      if (PERSON_GROUPS.test(d[c.group]) && !/_me$/.test(d[c.group]) && !B.platRaw[B.plat[i]]) B.platRaw[B.plat[i]] = d[c.color];
+      B.P[i * 3] = +d[c.layout_x] || 0; B.P[i * 3 + 1] = +d[c.layout_y] || 0; B.P[i * 3 + 2] = +d[c.layout_z] || 0;
+      B.index.set(d[c.id], i);
     }
-    this._project(P);
-    this.me = this.groups.indexOf('me');
-
-    // edges + adjacency (CSR) for highlight edges
-    const es = new Int32Array(E.rows.length), ed = new Int32Array(E.rows.length);
-    let m = 0;
+    const es = [], ed = [];
     for (const e of E.rows) {
-      const a = this.index.get(e[E.col.source]), b = this.index.get(e[E.col.target]);
-      if (a !== undefined && b !== undefined) { es[m] = a; ed[m] = b; m++; }
+      const a = B.index.get(e[E.col.source]), b = B.index.get(e[E.col.target]);
+      if (a !== undefined && b !== undefined) { es.push(a); ed.push(b); }
     }
-    this.es = es.subarray(0, m); this.ed = ed.subarray(0, m);
-    const start = new Int32Array(n + 1);
+    B.es = es; B.ed = ed;
+    this.n = n; this.X = new Float32Array(n * 3); this.x = new Float32Array(n); this.y = new Float32Array(n);
+    this._project(B.P);                                    // the projection comes from the accounts and chats only
+    this.platRaw = B.platRaw;
+    this._compose(people);
+    this.resize();
+    this.fit(false, this.is3D ? ANGLE_3D : null);
+    if (this._pending) { const [ids, o] = this._pending; this._pending = null; this.highlight(ids, o); }
+    return this;
+  }
+
+  // people changed (an account attached or detached, a person renamed or deleted): rebuild only their layer
+  setPeople(people) {
+    if (!this.base) { this._people = people; return; }
+    const hiIds = this.hi ? [...this.hi].map(i => this.ids[i]) : null, focusIds = this.focus ? [...this.focus].map(i => this.ids[i]) : null;
+    this._compose(people);
+    if (hiIds) { this.hi = new Set(hiIds.map(id => this.index.get(id)).filter(i => i !== undefined)); this.born = null; }
+    if (focusIds) this.focus = new Set(focusIds.map(id => this.index.get(id)).filter(i => i !== undefined));
+    this.glDirty = true; this.draw();
+  }
+
+  // the base (accounts, chats, their edges) plus one node per person, linked to each of their accounts
+  _compose(people) {
+    const B = this.base, bn = B.n;
+    const persons = (people || []).map(p => ({ ...p, members: (p.accounts || []).map(a => B.index.get(a.node)).filter(i => i !== undefined) }))
+      .filter(p => p.members.length || p.node === ME_PERSON);
+    const n = this.n = bn + persons.length;
+    const grow = (Arr, src, k = 1) => { const a = new Arr(n * k); a.set(src.subarray(0, bn * k)); return a; };
+    this.ids = B.ids.concat(persons.map(p => p.node)); this.labels = B.labels.concat(persons.map(p => p.name));
+    this.groups = B.groups.concat(persons.map(() => 'person')); this.plat = B.plat.concat(persons.map(() => 'person'));
+    this.size = new Float32Array(n); this.size.set(B.size);
+    this.col3 = grow(Float32Array, B.col3, 3);
+    this.X = grow(Float32Array, this.X, 3); this.x = grow(Float32Array, this.x); this.y = grow(Float32Array, this.y);
+    this.index = new Map(B.index); this.personOf = new Map(); this.accountsOf = new Map();
+    const pc = rgba(css('--person')).slice(0, 3);
+    const es = B.es.slice(), ed = B.ed.slice();
+    persons.forEach((p, k) => {
+      const i = bn + k;
+      this.index.set(p.node, i);
+      this.size[i] = p.members.reduce((t, m) => t + B.size[m], 0) || p.messages || 1;
+      this.col3.set(pc, i * 3);
+      // where: the centre of their accounts (me: the origin); a one-account person sits just outside it
+      let raw = [0, 0, 0];
+      if (p.node !== ME_PERSON && p.members.length) {
+        for (const m of p.members) for (let a = 0; a < 3; a++) raw[a] += B.P[m * 3 + a] / p.members.length;
+        if (p.members.length === 1) { const l = Math.hypot(...raw) || 1; raw = raw.map(v => v + v / l * 60); }
+      }
+      this._place(i, raw);
+      this.accountsOf.set(p.node, p.members.map(m => B.ids[m]));
+      for (const m of p.members) { this.personOf.set(B.ids[m], p.node); es.push(i); ed.push(m); }
+    });
+    this.es = Int32Array.from(es); this.ed = Int32Array.from(ed);
+    this.isPerson = new Uint8Array(n);
+    for (let i = 0; i < n; i++) this.isPerson[i] = PERSON_GROUPS.test(this.groups[i]) ? 1 : 0;
+    this.me = this.index.get(ME_PERSON) ?? -1;
+    this.peopleList = persons;
+
+    // adjacency (CSR) for highlight edges
+    const m = this.es.length, start = new Int32Array(n + 1);
     for (let k = 0; k < m; k++) { start[this.es[k] + 1]++; start[this.ed[k] + 1]++; }
     for (let i = 0; i < n; i++) start[i + 1] += start[i];
     this.adjStart = start; this.adj = new Int32Array(m * 2);
     const fill = start.slice(0, n);
     for (let k = 0; k < m; k++) { this.adj[fill[this.es[k]]++] = this.ed[k]; this.adj[fill[this.ed[k]]++] = this.es[k]; }
 
-    // radius (css px at the fitted zoom) by message count
+    // radius (css px at the fitted zoom) by message count; people a touch bigger than their biggest account
     this.r = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       this.r[i] = this.isPerson[i] ? Math.min(9, 1.3 + Math.sqrt(Math.log1p(this.size[i])) * 1.25)
         : 0.9 + Math.min(2, Math.log1p(this.size[i]) * 0.18);
+      if (i >= bn) this.r[i] = Math.min(11, this.r[i] + 1.5);
     }
     if (this.me >= 0) this.r[this.me] = 7;
-    // lod weight: people need 2+ messages, chats 3+, to appear at the overview zoom
+    // lod weight: accounts need 2+ messages, chats 3+, to appear at the overview zoom; people always show
     this.lod = new Float32Array(n);
-    for (let i = 0; i < n; i++) this.lod[i] = this.isPerson[i] ? this.size[i] : this.size[i] / 1.5;
-    if (this.me >= 0) this.lod[this.me] = 1e9;
+    for (let i = 0; i < n; i++) this.lod[i] = i >= bn ? 1e9 : this.isPerson[i] ? this.size[i] : this.size[i] / 1.5;
     this.byImportance = [];
     for (let i = 0; i < n; i++) if (this.isPerson[i]) this.byImportance.push(i);
     this.byImportance.sort((a, b) => this.size[b] - this.size[a]);
     this._buildGrid();
     this._initGL();
-    this.people = this.byImportance.map(i => ({
-      id: this.ids[i], pid: +this.ids[i].slice(2), name: this.labels[i], platform: this.plat[i],
-      group: this.groups[i], messages: this.size[i],
-    }));
-    this.resize();
-    this.fit(false, this.is3D ? ANGLE_3D : null);
-    if (this._pending) { const [ids, o] = this._pending; this._pending = null; this.highlight(ids, o); }
-    this.onInfo?.(`${num(this.people.length)} people · ${num(n - this.people.length)} chats`);
-    return this;
+    this.people = [];      // accounts (for the legend: which platforms are present)
+    for (let i = 0; i < bn; i++) if (this.isPerson[i]) this.people.push({ id: this.ids[i], platform: this.plat[i], messages: this.size[i] });
+    const accounts = this.people.length;
+    this.onInfo?.(`${num(persons.length)} people · ${num(accounts)} accounts · ${num(bn - accounts)} chats`);
   }
 
   _project(P) {
@@ -223,20 +272,25 @@ export class Graph {
     const e3 = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
     this.basis = [e1, e2, e3];
     // 3D: centred on the layout's median so it orbits about the middle of the cloud
-    const med = [0, 1, 2].map(a => { const v = []; for (let i = a; i < n * 3; i += step * 3) v.push(P[i]); v.sort((p, q) => p - q); return v[v.length >> 1] || 0; });
-    this.X = new Float32Array(n * 3);
+    const med = this.med = [0, 1, 2].map(a => { const v = []; for (let i = a; i < n * 3; i += step * 3) v.push(P[i]); v.sort((p, q) => p - q); return v[v.length >> 1] || 0; });
     const rs = [];
     for (let i = 0; i < n; i++) {
-      const a = P[i * 3] - med[0], b = P[i * 3 + 1] - med[1], c = P[i * 3 + 2] - med[2];
-      this.X[i * 3] = a; this.X[i * 3 + 1] = b; this.X[i * 3 + 2] = c;
-      this.x[i] = a * e1[0] + b * e1[1] + c * e1[2];
-      this.y[i] = a * e2[0] + b * e2[1] + c * e2[2];
-      if (i % step === 0) rs.push(Math.hypot(a, b, c));
+      this._place(i, [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]]);
+      if (i % step === 0) rs.push(Math.hypot(this.X[i * 3], this.X[i * 3 + 1], this.X[i * 3 + 2]));
     }
     rs.sort((p, q) => p - q);
     this.dist = 3 * (rs[Math.floor(rs.length * 0.98)] || 1);   // focal length: the camera's resting distance
     this.view.D = this.dist; this._tf = [0, 0];
     this.R = this._rot(this.view);
+  }
+
+  // a layout position (raw 3D) -> this node's centred 3D position and its flat-map coordinates
+  _place(i, raw) {
+    const [e1, e2] = this.basis, med = this.med;
+    const a = raw[0] - med[0], b = raw[1] - med[1], c = raw[2] - med[2];
+    this.X[i * 3] = a; this.X[i * 3 + 1] = b; this.X[i * 3 + 2] = c;
+    this.x[i] = a * e1[0] + b * e1[1] + c * e1[2];
+    this.y[i] = a * e2[0] + b * e2[1] + c * e2[2];
   }
 
   // rotation rows for a view: orbit (yaw, pitch) applied on top of the PCA basis
@@ -287,6 +341,8 @@ export class Graph {
   // ─── WebGL (the static bulk: every edge and node) ──────────────────────────
   _initGL() {
     const gl = this.gl;
+    for (const b of [this.bufPos, this.bufSize, this.bufLod, this.bufGlow, this.bufLines, this.bufLineLod]) if (b) gl.deleteBuffer(b);
+    if (this.P) return this._uploadGL();
     const prog = (vs, fs) => {
       const p = gl.createProgram();
       for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
@@ -303,6 +359,9 @@ export class Graph {
     };
     this.P = prog(VS_POINTS, FS_POINTS);
     this.L = prog(VS_LINES, FS_LINES);
+    this._uploadGL();
+  }
+  _uploadGL() {
     // draw order: chats first, then people from smallest to biggest ("me" is drawn on the overlay)
     const order = [];
     for (let i = 0; i < this.n; i++) if (!this.isPerson[i]) order.push(i);
@@ -331,7 +390,7 @@ export class Graph {
       accent: css('--accent'), accent2: css('--accent-2'), surface: css('--surface'),
       edgeAlpha: parseFloat(css('--graph-edge-alpha')) || 0.05,
       dark: document.documentElement.dataset.theme === 'dark',
-      plat: { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5'), whatsapp: css('--series-6'), other: css('--muted') },
+      plat: { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5'), whatsapp: css('--series-6'), person: css('--person'), other: css('--muted') },
     };
     if (this.order) {
       const platRGB = Object.fromEntries(Object.entries(this.colors.plat).map(([k, v]) => [k, rgba(v)]));
@@ -352,7 +411,7 @@ export class Graph {
       // 3D palette: the classic viewer's vivid colours. Its darker chat shades were made to sink into black,
       // so on a light background chats become light tints of their platform colour and white Facebook turns violet.
       const dark = this.colors.dark;
-      this.platColor3 = { ...this.platRaw };
+      this.platColor3 = { ...this.platRaw, person: this.colors.plat.person };
       if (!dark && /^#f/i.test(this.platColor3.facebook || '')) this.platColor3.facebook = this.colors.plat.facebook;
       const plat3 = Object.fromEntries(Object.entries(this.platColor3).map(([k, v]) => [k, rgba(v)]));
       const col3 = new Float32Array(this.order.length * 3);
@@ -597,6 +656,21 @@ export class Graph {
         labels.push({ i, x, y, r: this.r[i] * z, strong: false }); shown++;
       }
     }
+    // people: a clear line from each person to each of their accounts (the faint GL edges are for chats)
+    if (this.peopleList?.length) {
+      c.lineCap = 'round'; c.setLineDash([]);
+      for (const p of this.peopleList) {
+        const i = this.index.get(p.node);
+        if (i === undefined || (this.hi && !this.hi.has(i) && !p.members.some(m => this.hi.has(m)))) continue;
+        const [px, py] = this.toScreen(i);
+        c.strokeStyle = i === this.me ? C.accent : C.plat.person; c.lineWidth = i === this.me ? 1.4 : 1.6;
+        c.globalAlpha = this.hi ? 0.75 : 0.5;
+        c.beginPath();
+        for (const m of p.members) { const [ax, ay] = this.toScreen(m); c.moveTo(px, py); c.lineTo(ax, ay); }
+        c.stroke();
+      }
+      c.globalAlpha = 1;
+    }
     // "you": a gradient orb with a slow breathing halo
     if (me) {
       const [x, y] = me, r = 7.5 * Math.min(1.35, z), b = (Math.sin(t / 700) + 1) / 2;
@@ -708,11 +782,21 @@ export class Graph {
   infoById(id) { const i = this.index?.get(id); return i === undefined ? null : this.nodeInfo(i); }
   get meId() { return this.me >= 0 ? this.ids[this.me] : null; }
   nodeInfo(i) {
-    return { id: this.ids[i], label: this.labels[i], group: this.groups[i], platform: this.plat[i], size: this.size[i], person: !!this.isPerson[i] };
+    const id = this.ids[i], kind = id.startsWith('P_') ? 'person' : id.startsWith('A_') ? 'account' : 'chat';
+    return { id, kind, label: this.labels[i], group: this.groups[i], platform: this.plat[i], size: this.size[i],
+             person: !!this.isPerson[i], personOf: this.personOf?.get(id) || null, accounts: this.accountsOf?.get(id) || null };
   }
+  // the person an account belongs to (P_ id), if any; mine() = it is one of my own accounts
+  personOfNode(id) { return this.personOf?.get(id) || null; }
+  isMine(id) { return id === ME_PERSON || this.personOf?.get(id) === ME_PERSON; }
   tooltipHtml(i) {
-    const p = this.isPerson[i];
-    return `<b>${esc(cleanName(this.labels[i]))}${i === this.me ? ' (you)' : ''}</b><span>${p ? `${num(this.size[i])} messages` : 'conversation'} · ${esc(platformLabel(this.plat[i]))}</span>`;
+    const id = this.ids[i], name = esc(cleanName(this.labels[i]));
+    if (id.startsWith('P_')) {
+      const k = this.accountsOf.get(id)?.length || 0;
+      return `<b>${name}${i === this.me ? ' (you)' : ''}</b><span>person · ${k} account${k === 1 ? '' : 's'} · ${num(this.size[i])} messages</span>`;
+    }
+    const owner = this.personOf?.get(id), on = owner && owner !== ME_PERSON ? ` · ${esc(cleanName(this.labels[this.index.get(owner)]))}` : '';
+    return `<b>${name}</b><span>${this.isPerson[i] ? `${num(this.size[i])} messages` : 'conversation'} · ${esc(platformLabel(this.plat[i]))}${on}</span>`;
   }
 
   _bindInput() {

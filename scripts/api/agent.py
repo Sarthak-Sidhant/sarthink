@@ -22,7 +22,7 @@ import time
 from dotenv import dotenv_values
 from openai import OpenAI
 
-from common import INDEX_DB, REPO_ROOT, SRC_DB
+from common import INDEX_DB, REPO_ROOT, SRC_DB, USER_DB
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 MAX_STEPS = 10
@@ -49,7 +49,9 @@ How to work:
 - For questions about a relationship or a person in general, start with person_overview, then read a few of
   the example conversations it gives for the themes you mention. Its numbers are exact; cite them as [sql].
 - Use topic_timeline for "when" questions about a topic; then read the example excerpts it returns.
-- Use find_person when a name is ambiguous or you need someone's person_id.
+- People and accounts: a person (P_<id>) is a human Sarthak has grouped one or more accounts into (their
+  WhatsApp + Instagram, say); an account (A_<id>) is one profile on one platform. Tools accept a name, a P_ or an
+  A_ id; a person covers all of their accounts. Use find_person when a name is ambiguous.
 - Pass `alternatives` to search_memory for vague questions (other phrasings, Hinglish, his own words).
 - Questions like "what did X need help with / work on / talk about" can match many episodes: call
   person_overview for X first to see the range of themes, then search within the likely ones, so you do not
@@ -69,8 +71,8 @@ How to answer:
 - Notes: tool results may include `your_notes` — things Sarthak asked you to remember. Treat them as true and
   more authoritative than the chats; cite them as [note]. If a note contradicts the archive, say so.
 - Pronouns: use a person's pronouns only if a note or the chats clearly state them; otherwise use "they".
-- Cite individual numbers like [3] or [3][5]; never ranges. Never show internal ids (person_id, session_id,
-  chunk/msg ids, P_/T_ node ids) in the answer.
+- Cite individual numbers like [3] or [3][5]; never ranges. Never show internal ids (person_id, account_id,
+  session_id, chunk/msg ids, P_/A_/T_ node ids) in the answer.
 - Privacy: never repeat phone numbers, email addresses, street addresses, passwords, OTPs, bank/card/ID numbers, order/tracking numbers
   or similar personal identifiers — even Sarthak's own — unless he explicitly asks for that exact detail.
   This includes apartment/building, street and locality names: say "your address" instead.
@@ -87,7 +89,7 @@ TOOLS = [
             "alternatives": {"type": "array", "items": {"type": "string"},
                              "description": "up to 3 other phrasings (e.g. Hinglish, synonyms, how Sarthak would "
                                             "have written it); results of all phrasings are merged"},
-            "person": {"type": "string", "description": "only chats with this person (name or P_<id>)"},
+            "person": {"type": "string", "description": "only chats with this person or account (name, P_<id> or A_<id>)"},
             "platform": {"type": "string", "enum": ["whatsapp", "twitter", "reddit", "discord", "instagram", "facebook"]},
             "since": {"type": "string", "description": "YYYY-MM-DD"},
             "until": {"type": "string", "description": "YYYY-MM-DD"},
@@ -108,7 +110,8 @@ TOOLS = [
                        "(each with example conversations as numbered sources). Use it for 'what do X and I talk "
                        "about', 'tell me about my friendship with X', 'how did things with X change'.",
         "parameters": {"type": "object", "properties": {
-            "person": {"type": "string", "description": "name or P_<id>"}}, "required": ["person"]}}},
+            "person": {"type": "string", "description": "name, P_<id> (person: all their accounts) or A_<id> (one account)"}},
+            "required": ["person"]}}},
     {"type": "function", "function": {
         "name": "topic_timeline",
         "description": "WHEN was something talked about: month-by-month counts of the most relevant excerpts for "
@@ -142,21 +145,28 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"about": {"type": "string"}}}}},
     {"type": "function", "function": {
         "name": "find_person",
-        "description": "Find people by (partial) name; returns person_id, platform and message count.",
+        "description": "Find people and accounts by (partial) name. Returns people (node P_<id>: a human with "
+                       "one or more accounts) and accounts (node A_<id>: one platform profile, with the person it "
+                       "belongs to, if any), each with platforms and message count.",
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
     {"type": "function", "function": {
         "name": "run_sql",
         "description": (
             "Read-only SQLite SELECT for counts and stats. Views:\n"
-            "  messages(msg_id, person_id, person, is_me, platform, thread_id, thread, ts, day, content)\n"
-            "    one row per message; is_me=1 for Sarthak; ts = unix seconds UTC; day = 'YYYY-MM-DD' (IST)\n"
-            "  people(person_id, name, is_me, platform, placeholder, message_count)  placeholder=1: deleted/"
-            "deactivated account (one per chat; may carry a guessed name ending in '?')\n"
+            "  messages(msg_id, account_id, account, person_id, person, who_id, is_me, platform, thread_id, thread, ts,"
+            " day, content)\n"
+            "    one row per message. account = the platform account that wrote it; person_id/person = the human it "
+            "belongs to (NULL person_id if the account is in no person; then person = the account name); who_id = "
+            "'P_<person_id>' or 'A_<account_id>' — group by who_id to count per human. is_me=1 for Sarthak; ts = unix "
+            "seconds UTC; day = 'YYYY-MM-DD' (IST)\n"
+            "  accounts(account_id, name, platform, is_me, placeholder, message_count, person_id, person)  "
+            "placeholder=1: one chat of a deleted/deactivated account (may carry a guessed name ending in '?')\n"
+            "  people(person_id, name, accounts, message_count)  Sarthak is person_id 1\n"
             "  threads(thread_id, platform, title, is_dm)\n"
-            "Sarthak's person_id is 1. Example — who he talks with most in DMs:\n"
+            "Example — who he talks with most in DMs:\n"
             "  SELECT o.person, COUNT(*) n FROM messages o JOIN threads t USING(thread_id) WHERE t.is_dm=1 "
             "AND o.is_me=0 AND o.thread_id IN (SELECT thread_id FROM messages WHERE is_me=1) "
-            "GROUP BY o.person_id ORDER BY n DESC LIMIT 10\n"
+            "GROUP BY o.who_id ORDER BY n DESC LIMIT 10\n"
             f"Results are capped at {SQL_ROW_LIMIT} rows; long text is truncated. Include msg_id in the SELECT when "
             "you list individual messages: each such row then gets a citable source number [n]."),
         "parameters": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}},
@@ -205,11 +215,34 @@ class SqlTool:
     """Read-only connection with temp views; an authorizer blocks anything but reading."""
 
     def __init__(self):
+        from people import PeopleStore
+        PeopleStore(USER_DB).db.close()       # make sure the people tables exist before attaching read-only
         self.conn = sqlite3.connect(f"file:{INDEX_DB}?mode=ro", uri=True, check_same_thread=False)
         self.conn.execute(f"ATTACH DATABASE 'file:{SRC_DB}?mode=ro' AS src")
+        self.conn.execute(f"ATTACH DATABASE 'file:{USER_DB}?mode=ro' AS u")
         self.conn.executescript("""
+            CREATE TEMP VIEW accounts AS
+              SELECT a.account_id, a.name, a.platform, a.is_me, a.placeholder, a.message_count,
+                     pa.person_id, pe.name AS person
+              FROM main.Accounts a      -- main.: the temp view "accounts" shadows the table name (SQLite is case-blind)
+              LEFT JOIN u.PersonAccounts pa ON pa.platform = a.platform AND pa.raw_id = a.raw_id AND pa.chat = a.chat
+              LEFT JOIN u.People pe ON pe.person_id = pa.person_id;
             CREATE TEMP VIEW people AS
-              SELECT person_id, name, is_me, platform, placeholder, message_count FROM Persons;
+              SELECT pe.person_id, pe.name, COUNT(a.account_id) AS accounts, COALESCE(SUM(a.message_count), 0) AS message_count
+              FROM u.People pe
+              LEFT JOIN u.PersonAccounts pa ON pa.person_id = pe.person_id
+              LEFT JOIN main.Accounts a ON a.platform = pa.platform AND a.raw_id = pa.raw_id AND a.chat = pa.chat
+              GROUP BY pe.person_id;
+            CREATE TEMP VIEW msg_stats AS          -- internal: messages without the people columns (faster stats)
+              SELECT m.msg_id, a.account_id, a.is_me, t.platform, m.thread_id, t.title AS thread,
+                     date(COALESCE(m.timestamp_utc, CASE WHEN substr(m.msg_id, 1, 8) = 'twitter_' AND substr(m.msg_id, 9) GLOB '[0-9]*'
+                              THEN ((CAST(substr(m.msg_id, 9) AS INTEGER) >> 22) + 1288834974657) / 1000 END),
+                          'unixepoch', '+330 minutes') AS day
+              FROM src.Messages m
+              JOIN AccountUsers au ON au.user_id = m.author_id
+              LEFT JOIN AccountThreads at ON at.user_id = m.author_id AND at.thread_id = m.thread_id
+              JOIN main.Accounts a ON a.account_id = COALESCE(at.account_id, au.account_id)
+              JOIN src.Threads t ON t.id = m.thread_id;
             CREATE TEMP VIEW threads AS
               SELECT id AS thread_id, platform, title,
                      CASE WHEN platform IN ('discord', 'whatsapp') OR lower(title) LIKE 'dm%'
@@ -217,17 +250,21 @@ class SqlTool:
                                OR platform_thread_id LIKE '%:reddit.com%' THEN 1 ELSE 0 END AS is_dm
               FROM src.Threads;
             CREATE TEMP VIEW messages AS
-              SELECT m.msg_id, p.person_id, p.name AS person, p.is_me, t.platform, m.thread_id, t.title AS thread,
-                     t2.ts AS ts, date(t2.ts, 'unixepoch', '+330 minutes') AS day, m.content
-              FROM src.Messages m
-              JOIN (SELECT msg_id,
-                           COALESCE(timestamp_utc,
-                                    CASE WHEN substr(msg_id, 1, 8) = 'twitter_' AND substr(msg_id, 9) GLOB '[0-9]*'
-                                         THEN ((CAST(substr(msg_id, 9) AS INTEGER) >> 22) + 1288834974657) / 1000 END) AS ts
-                    FROM src.Messages) t2 ON t2.msg_id = m.msg_id   -- null tweet times recovered from Snowflake ids
-              JOIN PersonAliases a ON a.user_id = m.author_id
-              LEFT JOIN PersonThreads pt ON pt.user_id = m.author_id AND pt.thread_id = m.thread_id
-              JOIN Persons p ON p.person_id = COALESCE(pt.person_id, a.person_id)
+              SELECT m.msg_id, a.account_id, a.name AS account, pa.person_id, COALESCE(pe.name, a.name) AS person,
+                     COALESCE('P_' || pa.person_id, 'A_' || a.account_id) AS who_id, a.is_me, t.platform, m.thread_id,
+                     t.title AS thread,
+                     COALESCE(m.timestamp_utc, CASE WHEN substr(m.msg_id, 1, 8) = 'twitter_' AND substr(m.msg_id, 9) GLOB '[0-9]*'
+                              THEN ((CAST(substr(m.msg_id, 9) AS INTEGER) >> 22) + 1288834974657) / 1000 END) AS ts,
+                     date(COALESCE(m.timestamp_utc, CASE WHEN substr(m.msg_id, 1, 8) = 'twitter_' AND substr(m.msg_id, 9) GLOB '[0-9]*'
+                              THEN ((CAST(substr(m.msg_id, 9) AS INTEGER) >> 22) + 1288834974657) / 1000 END),
+                          'unixepoch', '+330 minutes') AS day, m.content
+              FROM src.Messages m          -- ts computed inline (null tweet times recovered from Snowflake ids), so
+                                           -- filters on thread/person use the indexes instead of scanning every message
+              JOIN AccountUsers au ON au.user_id = m.author_id
+              LEFT JOIN AccountThreads at ON at.user_id = m.author_id AND at.thread_id = m.thread_id
+              JOIN main.Accounts a ON a.account_id = COALESCE(at.account_id, au.account_id)
+              LEFT JOIN u.PersonAccounts pa ON pa.platform = a.platform AND pa.raw_id = a.raw_id AND pa.chat = a.chat
+              LEFT JOIN u.People pe ON pe.person_id = pa.person_id
               JOIN src.Threads t ON t.id = m.thread_id;
         """)
         self.conn.set_authorizer(self._authorize)
@@ -261,104 +298,101 @@ class SqlTool:
                 "truncated": len(rows) > SQL_ROW_LIMIT}
 
 
-THEMES = """Below are all conversation sessions between Sarthak and {name}, one per line:
-session_id | month | topics of that session.
-
-Group them into 5-10 recurring THEMES that describe what they talk about (merge near-duplicates; a session can
-belong to 2 themes; skip one-off noise). Order themes by number of sessions. Return JSON:
-{{"themes": [{{"theme": "short name", "description": "one sentence", "session_ids": ["s_..."]}}]}}
-
-{lines}"""
 
 from common import PROFILE_CACHE  # noqa: E402
+from themes import themes as local_themes  # noqa: E402
 
 
-class PersonProfiles:
-    """Exact stats (SQL) + LLM-grouped conversation themes per person, cached on disk."""
+class Profiles:
+    """Exact stats (SQL) + recurring themes (local, themes.py) for a set of accounts: one account, or all
+    accounts of a person. Cached on disk per scope ("A:<id>" / "P:<id>") until the accounts in it, their message
+    counts or the summaries change, so attaching an account to a person refreshes that person's profile."""
 
-    def __init__(self, sql, client, model="deepseek-flash", version="v1"):
-        self.sql, self.client, self.model, self.version = sql, client, model, version
+    def __init__(self, sql, version="v3"):      # v3: scopes over accounts (people = groups of accounts)
+        self.sql, self.version = sql, version
         self.cache = sqlite3.connect(PROFILE_CACHE, check_same_thread=False)
-        self.cache.execute("CREATE TABLE IF NOT EXISTS Profiles (person_id INTEGER, version TEXT, data TEXT, "
-                           "PRIMARY KEY (person_id, version))")
+        self.cache.execute("CREATE TABLE IF NOT EXISTS ScopeProfiles (scope TEXT, version TEXT, data TEXT, "
+                           "PRIMARY KEY (scope, version))")
         self.lock = threading.Lock()
 
     def _q(self, sql, args=()):
         with self.sql.lock:
             return self.sql.conn.execute(sql, args).fetchall()
 
-    def _fingerprint(self, pid):
-        """Changes when an import adds messages or summaries for this person, so the cached profile is rebuilt."""
-        msgs = self._q("SELECT message_count FROM Persons WHERE person_id=?", (pid,))
-        sessions = self._q("""SELECT COUNT(*) FROM Sessions s
+    def _sessions(self, account_ids):
+        return self._q("""SELECT s.session_id, s.start_ts, x.data FROM Sessions s
             JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model='deepseek-flash' AND x.prompt_version='v3'
-            WHERE EXISTS (SELECT 1 FROM json_each(s.person_ids) j WHERE j.value = ?)""", (pid,))
-        return [msgs[0][0] if msgs else 0, sessions[0][0]]
+            WHERE EXISTS (SELECT 1 FROM json_each(s.account_ids) j WHERE j.value IN (SELECT value FROM json_each(?)))
+            ORDER BY s.start_ts""", (json.dumps(list(account_ids)),))
 
-    def get(self, person_id):
+    def get(self, scope, account_ids, name):
+        account_ids = sorted(set(account_ids))
+        msgs = self._q("SELECT COALESCE(SUM(message_count), 0) FROM main.Accounts WHERE account_id IN "
+                       "(SELECT value FROM json_each(?))", (json.dumps(account_ids),))[0][0]
+        sessions = self._sessions(account_ids)
+        fp = [account_ids, msgs, len(sessions)]
         with self.lock:
-            row = self.cache.execute("SELECT data FROM Profiles WHERE person_id=? AND version=?",
-                                     (person_id, self.version)).fetchone()
-        fp = self._fingerprint(person_id)
-        if row:
+            row = self.cache.execute("SELECT data FROM ScopeProfiles WHERE scope=? AND version=?",
+                                     (scope, self.version)).fetchone()
+        if row and json.loads(row[0]).get("fingerprint") == fp:
             prof = json.loads(row[0])
-            # profiles cached before fingerprints existed: still valid while the summarized sessions match
-            if prof.get("fingerprint", [fp[0], prof.get("sessions_summarized")]) == fp:
-                return prof
-        prof = self._build(person_id)
+            prof["name"] = name                      # names change without the data changing
+            return prof
+        prof = self._build(account_ids, name, sessions)
         prof["fingerprint"] = fp
         with self.lock:
-            self.cache.execute("INSERT OR REPLACE INTO Profiles VALUES (?,?,?)",
-                               (person_id, self.version, json.dumps(prof, ensure_ascii=False)))
+            self.cache.execute("INSERT OR REPLACE INTO ScopeProfiles VALUES (?,?,?)",
+                               (scope, self.version, json.dumps(prof, ensure_ascii=False)))
             self.cache.commit()
         return prof
 
-    def _build(self, pid):
-        name = self._q("SELECT name FROM Persons WHERE person_id=?", (pid,))[0][0]
-        threads = [r[0] for r in self._q(
-            "SELECT DISTINCT thread_id FROM messages WHERE person_id=?", (pid,))]
+    def threads(self, account_ids):
+        """Chats these accounts wrote in, looked up through the accounts (indexed), not by scanning the messages
+        view. A placeholder account is one chat (AccountThreads)."""
+        aj = json.dumps(list(account_ids))
+        return [r[0] for r in self._q("""
+            SELECT thread_id FROM AccountThreads WHERE account_id IN (SELECT value FROM json_each(?1))
+            UNION
+            SELECT DISTINCT m.thread_id FROM AccountUsers au JOIN src.Messages m ON m.author_id = au.user_id
+            WHERE au.account_id IN (SELECT value FROM json_each(?1))
+              AND NOT EXISTS (SELECT 1 FROM AccountThreads x WHERE x.user_id = au.user_id)""", (aj,))]
+
+    def _build(self, account_ids, name, sessions):
+        threads = self.threads(account_ids)
         if not threads:
-            return {"person_id": pid, "name": name, "messages": 0}
-        ph = ",".join("?" * len(threads))
-        stats = self._q(f"""SELECT COUNT(*), SUM(is_me), SUM(person_id=?), MIN(day), MAX(day),
-                                   GROUP_CONCAT(DISTINCT platform)
-                            FROM messages WHERE thread_id IN ({ph})""", (pid, *threads))[0]
-        months = self._q(f"""SELECT substr(day,1,7) m, COUNT(*) n FROM messages WHERE thread_id IN ({ph})
-                             AND day IS NOT NULL GROUP BY m ORDER BY n DESC LIMIT 4""", tuple(threads))
-        sessions = self._q("""SELECT s.session_id, s.start_ts, x.data FROM Sessions s
-            JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model='deepseek-flash' AND x.prompt_version='v3'
-            WHERE EXISTS (SELECT 1 FROM json_each(s.person_ids) j WHERE j.value = ?) ORDER BY s.start_ts""", (pid,))
-        themes = []
-        if sessions and self.client:
-            lines = []
-            for sid, ts, data in sessions[-400:]:
-                topics = "; ".join((json.loads(data).get("topics") or [])[:6])
-                month = dt.datetime.fromtimestamp(ts, IST).strftime("%Y-%m")
-                lines.append(f"{sid} | {month} | {topics}")
-            r = self.client.chat.completions.create(
-                model=self.model, response_format={"type": "json_object"}, max_tokens=8000,
-                extra_body={"thinking": {"type": "disabled"}},
-                messages=[{"role": "user", "content": THEMES.format(name=name, lines="\n".join(lines))}])
-            try:
-                known = {s[0] for s in sessions}
-                for t in json.loads(r.choices[0].message.content).get("themes", []):
-                    ids = [s for s in t.get("session_ids", []) if s in known]
-                    if ids:
-                        themes.append({"theme": t.get("theme"), "description": t.get("description"),
-                                       "sessions": len(ids), "session_ids": ids})
-            except (json.JSONDecodeError, AttributeError):
-                pass
-        return {"person_id": pid, "name": name, "platforms": stats[5], "messages_total": stats[0],
-                "messages_by_sarthak": stats[1], "messages_by_them": stats[2], "first_day": stats[3],
-                "last_day": stats[4], "busiest_months": [{"month": m, "messages": n} for m, n in months],
-                "sessions_summarized": len(sessions), "themes": themes}
+            return {"name": name, "account_ids": account_ids, "messages_total": 0, "themes": []}
+        tj, aj = json.dumps(threads), json.dumps(account_ids)
+        stats = self._q("""SELECT COUNT(*), SUM(is_me), SUM(account_id IN (SELECT value FROM json_each(?))), MIN(day),
+                                  MAX(day), GROUP_CONCAT(DISTINCT platform)
+                           FROM msg_stats WHERE thread_id IN (SELECT value FROM json_each(?))""", (aj, tj))[0]
+        months = self._q("""SELECT substr(day,1,7) m, COUNT(*) n FROM msg_stats WHERE thread_id IN
+                            (SELECT value FROM json_each(?)) AND day IS NOT NULL GROUP BY m ORDER BY n DESC LIMIT 4""",
+                         (tj,))
+        return {"name": name, "account_ids": account_ids, "platforms": stats[5], "chats": len(threads),
+                "messages_total": stats[0], "messages_by_sarthak": stats[1], "messages_by_them": stats[2],
+                "first_day": stats[3], "last_day": stats[4],
+                "busiest_months": [{"month": m, "messages": n} for m, n in months],
+                "sessions_summarized": len(sessions), "themes": self._themes(sessions)}
+
+    def _themes(self, sessions):
+        """Recurring themes of these sessions, computed locally from their vectors and summary topics (themes.py)."""
+        if not sessions:
+            return []
+        sids = [x[0] for x in sessions]
+        chunk_rows = []
+        for i in range(0, len(sids), 900):
+            part = sids[i:i + 900]
+            chunk_rows += self._q(f"SELECT session_id, chunk_id FROM Chunks WHERE session_id IN ({','.join('?' * len(part))})",
+                                  tuple(part))
+        return local_themes(sessions, chunk_rows)
 
 
 from common import USER_DB as NOTES_DB  # noqa: E402
 
 
 class NotesStore:
-    """Things Sarthak explicitly asked Sarthink to remember. Person notes follow the person; topic notes surface
+    """Things Sarthak explicitly asked Sarthink to remember. A note can be about a person (P_), one account (A_) or
+    a topic. Person/account notes come back with that person or account; topic notes surface
     when one of their trigger keywords appears in the question, a search, or retrieved text. Nothing is put in
     the system prompt."""
 
@@ -366,30 +400,34 @@ class NotesStore:
         self.conn = sqlite3.connect(NOTES_DB, check_same_thread=False)
         self.conn.execute("""CREATE TABLE IF NOT EXISTS Notes (
             note_id INTEGER PRIMARY KEY, person_id INTEGER, subject TEXT, keywords TEXT, text TEXT,
-            created_at TEXT, active INTEGER DEFAULT 1)""")
+            created_at TEXT, active INTEGER DEFAULT 1, account_id INTEGER)""")
         self.lock = threading.Lock()
 
-    def add(self, text, subject, person_id=None, keywords=()):
+    def add(self, text, subject, person_id=None, keywords=(), account_id=None):
         kws = sorted({k.strip().lower() for k in keywords if k and len(k.strip()) >= 3})
         with self.lock:
             cur = self.conn.execute(
-                "INSERT INTO Notes(person_id, subject, keywords, text, created_at) VALUES (?,?,?,?,?)",
-                (person_id, subject, json.dumps(kws), text, dt.datetime.now(IST).isoformat(timespec="minutes")))
+                "INSERT INTO Notes(person_id, account_id, subject, keywords, text, created_at) VALUES (?,?,?,?,?,?)",
+                (person_id, account_id, subject, json.dumps(kws), text,
+                 dt.datetime.now(IST).isoformat(timespec="minutes")))
             self.conn.commit()
             return cur.lastrowid
 
     def _rows(self, where="", args=()):
         with self.lock:
-            rows = self.conn.execute(f"SELECT note_id, person_id, subject, keywords, text, created_at FROM Notes "
-                                     f"WHERE active=1 {where}", args).fetchall()
+            rows = self.conn.execute(f"SELECT note_id, person_id, subject, keywords, text, created_at, account_id "
+                                     f"FROM Notes WHERE active=1 {where}", args).fetchall()
         return [{"note_id": r[0], "person_id": r[1], "subject": r[2], "keywords": json.loads(r[3] or "[]"),
-                 "text": r[4], "saved": r[5]} for r in rows]
+                 "text": r[4], "saved": r[5], "account_id": r[6]} for r in rows]
 
-    def for_persons(self, pids):
-        pids = [int(p) for p in pids if str(p).isdigit()]
-        if not pids:
+    def for_nodes(self, nodes):
+        """Notes about any of these P_/A_ nodes."""
+        pids = [int(n[2:]) for n in nodes if n.startswith("P_") and n[2:].isdigit()]
+        aids = [int(n[2:]) for n in nodes if n.startswith("A_") and n[2:].isdigit()]
+        if not pids and not aids:
             return []
-        return self._rows(f"AND person_id IN ({','.join('?' * len(pids))})", tuple(pids))
+        return self._rows(f"AND (person_id IN ({','.join('?' * len(pids)) or 'NULL'}) "
+                          f"OR account_id IN ({','.join('?' * len(aids)) or 'NULL'}))", (*pids, *aids))
 
     def for_text(self, text):
         """Notes whose subject or keywords occur in the text (word-boundary match)."""
@@ -517,7 +555,8 @@ SOURCES:
 
 class Agent:
     """backend: object with search(q, k, **filters) -> list[chunk payload], session(id) -> dict,
-    person(name) -> list[dict]; payloads are the API's JSON shapes."""
+    person(name) -> list of people/account candidates, resolve(name or P_/A_ id) -> scope dict
+    {kind, id, node, name, scope, account_ids}; payloads are the API's JSON shapes."""
 
     def __init__(self, backend, model="deepseek-v4-pro", thinking=True, verify=False, verify_model="deepseek-flash"):
         key = dotenv_values(REPO_ROOT / ".env").get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
@@ -529,7 +568,7 @@ class Agent:
         self.verify = verify
         self.verify_model = verify_model
         self.sql = SqlTool()
-        self.profiles = PersonProfiles(self.sql, self.client)
+        self.profiles = Profiles(self.sql)
         self._lock = threading.RLock()
         self.research_model = "deepseek-v4-pro"   # flash researchers were cheaper but measurably worse
         self.notes = NotesStore()
@@ -580,6 +619,8 @@ class Agent:
         k = max(1, min(int(k or 8), 15))
         filters = {f: v for f, v in filters.items() if v not in (None, "")}
         phrasings = [query] + [a for a in (alternatives or []) if isinstance(a, str) and a.strip()][:3]
+        if hasattr(self.backend, "prefetch"):
+            self.backend.prefetch(phrasings)          # all phrasings in one encoder request
         try:
             ranked = [self.backend.search(p, k, **filters) for p in phrasings]
         except Exception as e:
@@ -617,19 +658,15 @@ class Agent:
                 "previous_session": s.get("previous_session"), "next_session": s.get("next_session")}
 
     def _overview(self, sources, person):
-        p = str(person)
-        if p.startswith("P_") and p[2:].isdigit():
-            pid = int(p[2:])
-        else:
-            cands = self.backend.person(p)
-            if not cands:
-                return {"error": f"no person matching {person!r}"}
-            pid = cands[0]["person_id"]
         try:
-            prof = self.profiles.get(pid)
+            sc = self.backend.resolve(str(person))          # person (all accounts) or one account
+            prof = self.profiles.get(sc["scope"], sc["account_ids"], sc["name"])
         except Exception as e:
             return {"error": str(e)[:300]}
-        out = {k: v for k, v in prof.items() if k != "themes"}
+        out = {k: v for k, v in prof.items() if k not in ("themes", "fingerprint", "account_ids")}
+        out["node"] = sc["node"]
+        if sc["kind"] == "person":
+            out["accounts"] = sc.get("accounts", [])
         out["themes"] = []
         for t in prof.get("themes", []):
             examples = []
@@ -645,14 +682,16 @@ class Agent:
         return out
 
     def _remember(self, note, person=None, topic=None, keywords=None):
-        pid, subject = None, topic or "general"
+        pid, aid, subject = None, None, topic or "general"
         if person:
-            cands = self.backend.person(person)
-            if not cands:
-                return {"error": f"no person matching {person!r}; ask Sarthak which person he means"}
-            pid, subject = cands[0]["person_id"], cands[0]["name"]
+            try:
+                sc = self.backend.resolve(person)           # a person if one matches, else one account
+            except Exception:
+                return {"error": f"no person or account matching {person!r}; ask Sarthak who he means"}
+            subject = sc["name"]
+            pid, aid = (sc["id"], None) if sc["kind"] == "person" else (None, sc["id"])
         kws = list(keywords or []) + ([person] if person else []) + ([topic] if topic else [])
-        nid = self.notes.add(note, subject, pid, kws)
+        nid = self.notes.add(note, subject, pid, kws, account_id=aid)
         return {"saved": True, "about": subject, "note": note, "id": nid}
 
     def _attach_notes(self, name, args, res, trace):
@@ -660,17 +699,17 @@ class Agent:
         keywords appear in the query or retrieved text."""
         if not isinstance(res, dict) or "error" in res or name in ("remember", "forget", "list_notes"):
             return
-        pids, text = set(), " ".join(str(v) for v in args.values())
+        nodes, text = set(), " ".join(str(v) for v in args.values())
         for r in res.get("results", []) if isinstance(res.get("results"), list) else []:
-            pids.update(n[2:] for n in r.get("nodes", []) if n.startswith("P_"))
+            nodes.update(r.get("nodes", []))
             text += " " + r.get("where", "") + " " + (r.get("excerpt") or "")[:400]
-        pids.update(n[2:] for n in res.get("nodes", []) if n.startswith("P_"))
-        if res.get("person_id"):
-            pids.add(str(res["person_id"]))
+        nodes.update(res.get("nodes", []) if isinstance(res.get("nodes"), list) else [])
+        if isinstance(res.get("node"), str):
+            nodes.add(res["node"])
         for c in res.get("candidates", []) if isinstance(res.get("candidates"), list) else []:
-            pids.add(str(c.get("person_id")))
+            nodes.update([c.get("node"), c.get("person_node")] if c.get("person_node") else [c.get("node")])
         text += " " + res.get("where", "") + " " + (res.get("messages") or "")[:2000]
-        fresh = [n for n in self.notes.for_persons(pids) + self.notes.for_text(text)
+        fresh = [n for n in self.notes.for_nodes({n for n in nodes if n}) + self.notes.for_text(text)
                  if n["note_id"] not in trace.notes_shown]
         if fresh:
             for n in fresh:
@@ -680,7 +719,7 @@ class Agent:
     def _question_notes(self, question, trace):
         found = [n for n in self.notes.for_text(question) if n["note_id"] not in trace.notes_shown]
         # person notes whose person's name appears in the question
-        for n in self.notes._rows("AND person_id IS NOT NULL"):
+        for n in self.notes._rows("AND (person_id IS NOT NULL OR account_id IS NOT NULL)"):
             first = re.sub(r"[^a-z0-9]+", " ", n["subject"].lower()).strip().split(" ")[0]
             if first and len(first) >= 3 and re.search(rf"\b{re.escape(first)}\b", question.lower()) \
                     and n["note_id"] not in trace.notes_shown and n not in found:

@@ -18,43 +18,48 @@ const graph = new Graph($('graph'), {
     tip.style.left = Math.min(pane.width - tip.offsetWidth - 8, h.x + 14) + 'px';
     tip.style.top = Math.min(pane.height - tip.offsetHeight - 8, h.y + 14) + 'px';
   },
-  // a person on the full map: open their constellation
+  // a person or an account on the full map: a card, and their constellation
   onClick: n => {
-    if (!n.person) return;
-    const p = { pid: +n.id.slice(2), name: n.label, platform: n.platform, size: n.size, isMe: n.group === 'me' };
+    if (n.kind !== 'person' && n.kind !== 'account') return;
+    const p = { ref: n.id, name: n.label, platform: n.platform, size: n.size, isMe: graph.isMine(n.id), accounts: n.accounts };
     personCard(p);
-    if (!p.isMe) stage.showPerson(p.pid, p.name);
+    if (!p.isMe) stage.showPerson(p.ref, p.name);
   },
   onInfo: t => { $('graph-info').textContent = t; },
 });
 const stage = new Stage(graph, {
   // a session in the 3D view: open it in the sources pane (as its citation, when it is one)
   onSession: n => (n.n != null && chat.sel ? chat.openSource(n.n) : chat.openSession(n.session, 'Conversation')),
-  onPerson: n => personCard({ pid: n.pid, name: n.label, platform: n.platform, size: n.size }),
+  onPerson: n => personCard({ ref: n.ref, name: n.label, platform: n.platform, size: n.size, isMe: graph.isMine(n.ref) }),
 });
 const chat = new Chat(stage);
 const reminders = new Reminders();
 const people = new People({
   onAsk: q => { location.hash = '#ask'; chat.prefill(q); },
-  onShowInGraph: (pid, name) => { location.hash = '#ask'; requestAnimationFrame(() => stage.showPerson(pid, name)); },
+  onShowInGraph: (ref, name) => { location.hash = '#ask'; requestAnimationFrame(() => stage.showPerson(ref, name)); },
+  onPeopleChanged: list => graph.setPeople(list),     // a link shows up in the graph at once
 });
 
-// a person picked on the map or in the 3D view: a small card in the sources pane
-function personCard({ pid, name, platform, size, isMe }) {
+// a person or account picked on the map or in the 3D view: a small card in the sources pane
+function personCard({ ref, name, platform, size, isMe, accounts }) {
   name = cleanName(name);
+  const owner = ref.startsWith('A_') ? graph.personOfNode(ref) : null, ownerInfo = owner && owner !== 'P_1' ? graph.infoById(owner) : null;
+  const what = ref.startsWith('P_') ? `${dot('person')}Person · ${accounts?.length || 0} account${accounts?.length === 1 ? '' : 's'}`
+    : `${dot(platform)}${esc(platformLabel(platform))}${ownerInfo ? ` · part of ${esc(cleanName(ownerInfo.label))}` : ''}`;
   $('sources-title').textContent = name; $('sources-sub').textContent = '';
   $('sources-body').innerHTML = `
     <div style="padding:10px 8px">
-      <div class="d muted" style="display:flex;gap:6px;align-items:center;font-size:12.5px">${dot(platform)}${esc(platformLabel(platform))}${size ? ` · ${num(size)} messages` : ''}</div>
+      <div class="d muted" style="display:flex;gap:6px;align-items:center;font-size:12.5px">${what}${size ? ` · ${num(size)} messages` : ''}</div>
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
-        <a class="primary-btn" href="#people/${pid}">Open profile</a>
+        <a class="primary-btn" href="#people/${ref}">Open profile</a>
+        ${ownerInfo ? `<a class="ghost-btn" href="#people/${owner}">Open ${esc(cleanName(ownerInfo.label))}</a>` : ''}
         ${isMe ? '' : `<button class="ghost-btn" data-ask-about>Ask about ${esc(name.length > 20 ? 'them' : name)}</button>`}
         ${isMe ? '' : '<button class="ghost-btn" data-explore>Explore in 3D</button>'}
         ${chat.sel ? '<button class="ghost-btn" data-back>Back to sources</button>' : ''}
       </div>
     </div>`;
   $('sources-body').querySelector('[data-ask-about]')?.addEventListener('click', () => chat.prefill(`What's the story with ${name}? What do we talk about?`));
-  $('sources-body').querySelector('[data-explore]')?.addEventListener('click', () => stage.showPerson(pid, name));
+  $('sources-body').querySelector('[data-explore]')?.addEventListener('click', () => stage.showPerson(ref, name));
   $('sources-body').querySelector('[data-back]')?.addEventListener('click', () => chat.select(chat.sel));
 }
 
@@ -118,12 +123,13 @@ health(); setInterval(health, 30000);
 reminders.badge();
 
 // ─── graph data ───────────────────────────────────────────────────────────
-graph.load('/processed_data/graph/cosmograph_nodes.csv', '/processed_data/graph/cosmograph_edges.csv')
+api('/api/people').catch(() => ({ people: [] }))
+  .then(r => graph.load('/processed_data/graph/cosmograph_nodes.csv', '/processed_data/graph/cosmograph_edges.csv', r.people))
   .then(g => {
     const present = new Set(g.people.map(p => p.platform));
-    $('graph-legend').innerHTML = `<span><i style="background:var(--grad)"></i>You</span>` +
+    $('graph-legend').innerHTML = `<span><i style="background:var(--grad)"></i>You</span><span><i style="background:var(--person)"></i>People</span>` +
       PLATFORMS.filter(p => present.has(p.key)).map(p => `<span><i style="background:var(${p.slot})"></i>${esc(p.label)}</span>`).join('');
-    people.setPeople(g.people);
+    people.load();
     legend3D();
     stage.graphLoaded();
     chat.afterGraphLoad();
@@ -131,5 +137,5 @@ graph.load('/processed_data/graph/cosmograph_nodes.csv', '/processed_data/graph/
   .catch(e => {
     $('graph-info').textContent = 'Graph unavailable';
     showGraphError(`The memory map couldn't load: ${e.message || e}`);
-    $('ppl-items').innerHTML = '<p class="placeholder">The people list needs the graph data, which failed to load.</p>';
+    people.load();                         // the people pages don't need the graph
   });

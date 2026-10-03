@@ -40,8 +40,17 @@ def main():
         tunnel = subprocess.Popen(["bash", str(ROOT / "scripts" / "api" / "tunnel.sh"), a.gpu[0], a.gpu[1], "8101"])
         env["EMBED_URL"] = "http://127.0.0.1:8101"
         time.sleep(4)
-    elif env["SARTHINK_EMBED_MODEL"] == "8b" and not env.get("EMBED_URL"):
-        print("Note: the 8b embedding model needs a GPU (--gpu HOST PORT); search falls back to keywords without it.")
+    elif env["SARTHINK_EMBED_MODEL"] in ("8b", "4b") and not env.get("EMBED_URL"):
+        try:
+            from dotenv import dotenv_values
+            has_key = env.get("OPENROUTER_API_KEY") or dotenv_values(ROOT / ".env").get("OPENROUTER_API_KEY")
+        except ImportError:
+            has_key = env.get("OPENROUTER_API_KEY")
+        if has_key:      # same Qwen3 weights hosted on OpenRouter: no GPU needed, ~0.5-1 s per question
+            env["EMBED_URL"] = "openrouter"
+        else:
+            print("Note: the 8b embedding model needs OPENROUTER_API_KEY in .env or a GPU (--gpu HOST PORT); "
+                  "search falls back to keywords without it.")
 
     try:
         from dotenv import dotenv_values

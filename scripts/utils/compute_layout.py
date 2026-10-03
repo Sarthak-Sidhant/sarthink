@@ -231,31 +231,41 @@ def _cap_direction(axis, half_angle_deg, rng):
 
 
 def compute_relational_layout(nodes: list[dict], edges: list[dict]) -> dict[str, tuple]:
-    """Me at the origin; people at a distance set by how much we talked (closer = more), in a
-    per-platform sector; each thread at the message-weighted centroid of its participants."""
+    """My accounts near the origin, each toward its platform; other accounts at a distance set by how much we
+    talked (closer = more, across all my accounts), in a per-platform sector; each thread at the
+    message-weighted centroid of its participants. The viewer draws me (person) at the origin."""
     rng = random.Random(42)
-    by_id = {n['id']: n for n in nodes}
-    me = next(n['id'] for n in nodes if n['group'] == 'me')
+    mine = {n['id'] for n in nodes if n['group'] == 'me' or n['group'].endswith('_me')}   # my accounts
 
-    members = {}                                  # thread -> {person: weight}
+    members = {}                                  # thread -> {account: weight}
     for e in edges:
         members.setdefault(e['target'], {})[e['source']] = int(e['weight'])
 
     closeness = {}
     for t, ps in members.items():
-        if me not in ps:
+        me_w = sum(w for p, w in ps.items() if p in mine)
+        if not me_w:
             continue
         for p, w in ps.items():
-            if p != me:
-                closeness[p] = closeness.get(p, 0) + w + ps[me]
+            if p not in mine:
+                closeness[p] = closeness.get(p, 0) + w + me_w
     cmax = max(closeness.values()) if closeness else 1
 
     platforms = [p for p in PLATFORM_ORDER if any(n['group'].startswith(p) for n in nodes)]
     axes = dict(zip(platforms, fibonacci_3d(len(platforms), 1.0)))
+    plat_of_mine = {}
+    for e in edges:
+        if e['source'] in mine and e['source'] not in plat_of_mine:
+            plat_of_mine[e['source']] = e['target']
 
-    pos = {me: (0.0, 0.0, 0.0)}
+    group_of = {n['id']: n['group'] for n in nodes}
+    pos = {}
+    for m in mine:                                # near the centre, pulled toward the platform it is on
+        plat = get_platform(group_of.get(plat_of_mine.get(m, ''), 'twitter'))
+        a = axes.get(plat, (1.0, 0.0, 0.0))
+        pos[m] = tuple(a[i] * R_IN * 0.5 + rng.gauss(0, 15) for i in range(3))
     for n in nodes:
-        if n['id'] == me or not n['id'].startswith('P_'):
+        if n['id'] in mine or not n['id'].startswith(('A_', 'P_')):
             continue
         plat = get_platform(n['group'])
         c = closeness.get(n['id'], 0)
@@ -270,7 +280,7 @@ def compute_relational_layout(nodes: list[dict], edges: list[dict]) -> dict[str,
         if not tid.startswith('T_'):
             continue
         ps = members.get(tid, {})
-        others = {p: w for p, w in ps.items() if p != me}
+        others = {p: w for p, w in ps.items() if p not in mine}
         plat = get_platform(n['group'])
         if not others:                            # my solo posts: an even-density cloud in the platform's sector
             r = R_IN * 1.3 + R_OUT * 0.4 * rng.random() ** (1 / 3)   # cube root -> uniform volume density
@@ -411,7 +421,7 @@ def main():
 
     # ── Step 1: fast galaxy seed ──────────────────────────────────────────────
     t0 = time.time()
-    if any(n['group'] == 'me' for n in nodes):
+    if any(n['group'] == 'me' or n['group'].endswith('_me') for n in nodes):
         print("Computing me-centred relational layout…")
         positions = compute_relational_layout(nodes, edges)
     else:
