@@ -145,7 +145,7 @@ export class Graph {
     const n = N.rows.length, c = N.col;
     const B = this.base = {
       n, ids: new Array(n), labels: new Array(n), groups: new Array(n), plat: new Array(n), size: new Float32Array(n),
-      col3: new Float32Array(n * 3), P: new Float64Array(n * 3), index: new Map(), platRaw: {},
+      col3: new Float32Array(n * 3), P: new Float64Array(n * 3), index: new Map(),
     };
     for (let i = 0; i < n; i++) {
       const d = N.rows[i];
@@ -153,7 +153,6 @@ export class Graph {
       B.ids[i] = d[c.id]; B.labels[i] = d[c.label]; B.groups[i] = d[c.group];
       B.size[i] = +d[c.size] || 1;
       B.plat[i] = platformOf(d[c.group]);
-      if (PERSON_GROUPS.test(d[c.group]) && !/_me$/.test(d[c.group]) && !B.platRaw[B.plat[i]]) B.platRaw[B.plat[i]] = d[c.color];
       B.P[i * 3] = +d[c.layout_x] || 0; B.P[i * 3 + 1] = +d[c.layout_y] || 0; B.P[i * 3 + 2] = +d[c.layout_z] || 0;
       B.index.set(d[c.id], i);
     }
@@ -165,7 +164,6 @@ export class Graph {
     B.es = es; B.ed = ed;
     this.n = n; this.X = new Float32Array(n * 3); this.x = new Float32Array(n); this.y = new Float32Array(n);
     this._project(B.P);                                    // the projection comes from the accounts and chats only
-    this.platRaw = B.platRaw;
     this._compose(people);
     this.resize();
     this.fit(false, this.is3D ? ANGLE_3D : null);
@@ -408,17 +406,16 @@ export class Graph {
           lc[k * 8 + o] = c[0]; lc[k * 8 + o + 1] = c[1]; lc[k * 8 + o + 2] = c[2]; lc[k * 8 + o + 3] = 1;
         }
       }
-      // 3D palette: the classic viewer's vivid colours. Its darker chat shades were made to sink into black,
-      // so on a light background chats become light tints of their platform colour and white Facebook turns violet.
-      const dark = this.colors.dark;
-      this.platColor3 = { ...this.platRaw, person: this.colors.plat.person };
-      if (!dark && /^#f/i.test(this.platColor3.facebook || '')) this.platColor3.facebook = this.colors.plat.facebook;
-      const plat3 = Object.fromEntries(Object.entries(this.platColor3).map(([k, v]) => [k, rgba(v)]));
+      // 3D: the same palette as the flat map. Accounts take their platform colour; chats a softer shade of it,
+      // lighter on a light background and deeper on a dark one, so accounts stand out of their chat clouds.
+      const dark = this.colors.dark, to = dark ? rgba(this.colors.bg) : [1, 1, 1];
+      this.platColor3 = this.colors.plat;
       const col3 = new Float32Array(this.order.length * 3);
       this.order.forEach((i, k) => {
-        if (dark || !plat3[this.plat[i]]) { col3.set(this.col3.subarray(i * 3, i * 3 + 3), k * 3); return; }
-        const c = plat3[this.plat[i]], w = this.isPerson[i] ? 0 : 0.45;
-        col3.set([c[0] + (1 - c[0]) * w, c[1] + (1 - c[1]) * w, c[2] + (1 - c[2]) * w], k * 3);
+        const c = platRGB[this.plat[i]];
+        if (!c) { col3.set(this.col3.subarray(i * 3, i * 3 + 3), k * 3); return; }
+        const w = this.isPerson[i] ? 0 : dark ? 0.35 : 0.4;
+        col3.set([c[0] + (to[0] - c[0]) * w, c[1] + (to[1] - c[1]) * w, c[2] + (to[2] - c[2]) * w], k * 3);
       });
       for (const b of [this.bufCol, this.bufLineCol, this.bufCol3]) if (b) this.gl.deleteBuffer(b);
       this.bufCol = this._buf(col); this.bufLineCol = this._buf(lc); this.bufCol3 = this._buf(col3);

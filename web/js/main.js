@@ -68,15 +68,10 @@ $('graph-fit').addEventListener('click', () => (stage.inFocus ? stage.focus.show
 // flat map ⇄ 3D (remembered per browser)
 function set3D(on, animate = true) {
   graph.set3D(on, animate);
-  legend3D();
   $('graph-3d').textContent = on ? '2D' : '3D';
   $('graph-3d').setAttribute('aria-pressed', String(on));
   $('graph-3d').title = on ? 'Back to the flat map' : 'Show the map in 3D — drag to orbit, shift-drag to pan';
   try { localStorage.setItem('sarthink.map3d', on ? '1' : '0'); } catch (e) { /* storage blocked */ }
-}
-// the legend follows the 3D view's vivid palette
-function legend3D() {
-  for (const p of PLATFORMS) $('graph-pane').style.setProperty(p.slot, graph.is3D && graph.platColor3?.[p.key] || '');
 }
 $('graph-3d').addEventListener('click', () => set3D(!graph.is3D));
 try { if (localStorage.getItem('sarthink.map3d') === '1') set3D(true, false); } catch (e) { /* storage blocked */ }
@@ -101,7 +96,6 @@ $('theme-btn').addEventListener('click', () => {
   document.documentElement.dataset.theme = next;
   try { localStorage.setItem('sarthink.theme', next); } catch { /* ignore */ }
   stage.themeChanged();
-  legend3D();
 });
 
 // ─── backend status ───────────────────────────────────────────────────────
@@ -130,7 +124,6 @@ api('/api/people').catch(() => ({ people: [] }))
     $('graph-legend').innerHTML = `<span><i style="background:var(--grad)"></i>You</span><span><i style="background:var(--person)"></i>People</span>` +
       PLATFORMS.filter(p => present.has(p.key)).map(p => `<span><i style="background:var(${p.slot})"></i>${esc(p.label)}</span>`).join('');
     people.load();
-    legend3D();
     stage.graphLoaded();
     chat.afterGraphLoad();
   })

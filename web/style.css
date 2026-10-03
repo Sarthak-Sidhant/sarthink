@@ -30,10 +30,11 @@
   --bad: #d23f63;
   --shadow: 0 1px 2px rgba(40, 60, 110, .05), 0 6px 24px rgba(40, 60, 110, .07);
   --shadow-lg: 0 12px 48px rgba(40, 60, 110, .18);
-  /* platform slots, fixed order (validated: CVD-safe adjacent pairs on this surface) + the activity ramp */
-  --series-1: #2f8fe0; --series-2: #f0754f; --series-3: #1fa595; --series-4: #7a63dd; --series-5: #e05b9c; --series-6: #c9900c;
+  /* platform colours, one palette for every view (2D map, 3D map, focus view, dots, legend): each platform near
+     its own brand hue, kept apart in hue and lightness (Facebook takes amber: its blue is Twitter's) */
+  --series-1: #3a9ff0; --series-2: #f26b3a; --series-3: #6366f1; --series-4: #f0b429; --series-5: #e24c9a; --series-6: #22a565;
   --me: #18223a;
-  --person: #56607a;      /* a person (group of accounts): slate, unlike any platform */
+  --person: #6b7489;      /* a person (group of accounts): neutral slate, unlike any platform */
   --ramp-light: #f4b3d3;
   --graph-bg: #f7faff;
   --graph-wash:
@@ -61,8 +62,8 @@
   --accent-2: #ee7fb6; --accent-2-soft: rgba(238, 127, 182, .16);
   --good: #3cbf8a; --warn: #e0a030; --bad: #ef6b8c;
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 24px rgba(0, 0, 0, .3); --shadow-lg: 0 12px 48px rgba(0, 0, 0, .55);
-  --series-1: #3a93e0; --series-2: #e0683f; --series-3: #1d9a8b; --series-4: #8f7bf0; --series-5: #d9559a; --series-6: #e0a83a;
-  --me: #eef2fb; --ramp-light: #6b3a5c; --person: #aab3c9;
+  --series-1: #4aaaf5; --series-2: #f47a4c; --series-3: #8285f7; --series-4: #f5c04a; --series-5: #ec66ab; --series-6: #34c07a;
+  --me: #eef2fb; --ramp-light: #6b3a5c; --person: #b4bccc;
   --graph-bg: #10162a;
   --graph-wash:
     radial-gradient(60% 70% at 50% 50%, rgba(40, 52, 90, .9) 0%, rgba(40, 52, 90, 0) 70%),
