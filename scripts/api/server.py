@@ -723,6 +723,8 @@ def _inbox_facts():
             _INBOX["triage"] = {r[0]: (r[1], r[2]) for r in S.conn.execute(
                 "SELECT cid, verdict, reason FROM CommitmentTriage")} \
                 if S.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'CommitmentTriage'").fetchone() else {}
+            _INBOX["area"] = dict(S.conn.execute("SELECT cid, area FROM CommitmentArea").fetchall()) \
+                if S.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'CommitmentArea'").fetchone() else {}
     return _INBOX
 
 
@@ -741,12 +743,15 @@ def _bucket(r, triage, members, today, reopened=False):
 
 
 @app.get("/api/commitments")
-def commitments(owner: str = "all", status: str = "now", q: str = "", limit: int = Query(40, le=200),
+def commitments(owner: str = "all", status: str = "now", q: str = "", area: str = "", limit: int = Query(40, le=200),
                 offset: int = 0):
-    """status: now | cleared | older (the open items, split by _bucket), calendar | done | dismissed, or all."""
+    """status: now | cleared | older (the open items, split by _bucket), calendar | done | dismissed, or all.
+    area: one area of life (relationship, family, friends, work, study, projects, health, errands)."""
     st = dict(_status_db().execute("SELECT cid, status FROM CommitmentStatus").fetchall())
     facts, today = _inbox_facts(), dt.datetime.now(IST).date()
     reopened = {c for c, v in st.items() if v == "open"}
+    pnames, _, person_of = people_index()
+    areas = {}
     with LOCK:
         rows = S.conn.execute("SELECT * FROM Commitments ORDER BY COALESCE(due, said_on) DESC").fetchall()
     items, buckets = [], {"now": 0, "cleared": 0, "older": 0}
@@ -759,17 +764,26 @@ def commitments(owner: str = "all", status: str = "now", q: str = "", limit: int
             buckets[s] += 1
         if status not in ("all", s) and not (status == "open" and s in buckets):
             continue
-        if q and q.lower() not in f"{r['title']} {r['what']} {r['people']}".lower():
+        # who's in it, by today's names (the stored list predates contact names: "+91 82··· ··962")
+        nodes = json.loads(r["nodes"])
+        others = [int(n[2:]) for n in nodes if n.startswith("A_") and not ACCOUNTS.get(int(n[2:]), {}).get("is_me")]
+        people = [pnames[person_of[a]] if a in person_of else NAMES.get(a, "?") for a in others]
+        who = people[0] if r["owner"] == "them" and len(people) == 1 and str(r["who"] or "").startswith("+") else r["who"]
+        if q and q.lower() not in f"{r['title']} {r['what']} {' '.join(people)}".lower():
+            continue
+        ar = facts["area"].get(r["cid"], "other")
+        areas[ar] = areas.get(ar, 0) + 1
+        if area and ar != area:
             continue
         tr = facts["triage"].get(r["cid"])
-        items.append({"cid": r["cid"], "owner": r["owner"], "who": r["who"], "title": r["title"], "what": r["what"],
-                      "due": r["due"], "said_on": r["said_on"], "platform": r["platform"],
-                      "people": json.loads(r["people"]), "nodes": json.loads(r["nodes"]),
+        items.append({"cid": r["cid"], "owner": r["owner"], "who": who, "title": r["title"], "what": r["what"],
+                      "due": r["due"], "said_on": r["said_on"], "platform": r["platform"], "area": ar,
+                      "people": people, "nodes": nodes,
                       "session_id": r["session_id"], "status": s,
                       "triage": {"verdict": tr[0], "reason": tr[1]} if tr else None})
     counts = {"total": len(items), "mine": sum(i["owner"] == "me" for i in items),
               "theirs": sum(i["owner"] == "them" for i in items), "with_due": sum(bool(i["due"]) for i in items),
-              **buckets}
+              **buckets, "areas": areas}
     return {"counts": counts, "items": items[offset:offset + limit]}
 
 
@@ -938,7 +952,8 @@ if __name__ == "__main__":
     print(f"Data: {DATA_DIR} | {len(S.ids)} chunks | encoder: {S.encoder_url or 'local ' + a.model + ' model'}")
 
     def _warm():          # dossiers take ~30-40s to build (yours spans the whole archive): have them ready, not on
-        for pid in [ME] + [p for p in PEOPLE.people() if p != ME]:      # first click (cached after)
+        _inbox_facts()                                                  # first click (cached after); inbox ~8s cold
+        for pid in [ME] + [p for p in PEOPLE.people() if p != ME]:
             try:
                 people_dossier(pid)
             except Exception as e:

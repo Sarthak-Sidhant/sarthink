@@ -12,17 +12,21 @@ Verdicts are derived (CommitmentTriage in the index DB, with model and date); th
 under "Auto-cleared" with the reason. The user's own done/dismissed always wins. Items already judged are not
 re-asked unless --recheck (pending ones whose chat has moved on can be re-asked with it).
 
-Usage: python3 scripts/index/triage_inbox.py [--recheck] [--limit N]
+Every item (current or not) also gets an area of life (AREAS), from its text, the people in it and Sarthak's notes
+about people, so the inbox can tell a date with his girlfriend from a client deliverable (CommitmentArea).
+
+Usage: python3 scripts/index/triage_inbox.py [--recheck] [--limit N] [--areas-only]
 """
 import argparse
 import concurrent.futures as cf
 import datetime as dt
 import json
+import sqlite3
 
 from dotenv import dotenv_values
 from openai import OpenAI
 
-from common import REPO_ROOT, connect_index
+from common import REPO_ROOT, USER_DB, connect_index
 
 MODEL = "deepseek-flash"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
@@ -47,6 +51,25 @@ CHAT ({said_on})
 
 WHAT CAME NEXT
 {after}"""
+
+AREAS = {
+    "relationship": "romantic partner / dating",
+    "family": "parents, siblings, relatives",
+    "friends": "friends, hanging out, favours between friends",
+    "work": "jobs, clients, freelancing, journalism, internships, hackathon teams, applications",
+    "study": "college, school, exams, coursework, admissions",
+    "projects": "his own builds and side projects (code, hardware, websites, content)",
+    "health": "body, doctors, medicine, fitness, mental health",
+    "errands": "money, payments, shopping, bookings, travel logistics",
+}
+AREA_PROMPT = """Sort each to-do from Sarthak's chats into ONE area of his life:
+{areas}
+Use the people involved and these notes Sarthak saved about people:
+{notes}
+Return JSON: {{"items": [{{"i": <index>, "area": "<one of: {keys}>"}}]}}
+
+{items}"""
+AREA_BATCH = 40
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS CommitmentTriage (
     cid TEXT PRIMARY KEY, verdict TEXT, reason TEXT, model TEXT, checked_on TEXT)"""
@@ -96,9 +119,61 @@ def ago(day):
                          else f"in {d} days" if d > 0 else f"{-d} days ago")
 
 
+def notes_about_people():
+    """Sarthak's notes about people ("Devanshi is Sarthak's girlfriend…"), as context for sorting."""
+    try:
+        with sqlite3.connect(USER_DB) as u:
+            return "\n".join(f"- {s}: {t}" for s, t in u.execute(
+                "SELECT subject, text FROM Notes WHERE active = 1 AND (person_id IS NOT NULL OR account_id IS NOT NULL)"))
+    except sqlite3.Error:
+        return ""
+
+
+def classify_areas(conn, client):
+    """An area of life for every item that has none yet: cheap, no chat needed (title, text, people, notes)."""
+    conn.execute("CREATE TABLE IF NOT EXISTS CommitmentArea (cid TEXT PRIMARY KEY, area TEXT, model TEXT)")
+    rows = conn.execute("""SELECT cid, owner, who, title, what, people, platform FROM Commitments
+                           WHERE cid NOT IN (SELECT cid FROM CommitmentArea)""").fetchall()
+    if not rows:
+        return
+    notes, areas = notes_about_people() or "(none)", "\n".join(f"- {k}: {v}" for k, v in AREAS.items())
+
+    def ask(batch):
+        lines = "\n".join(f"{i}. [{'Sarthak' if r[1] == 'me' else r[2]}; with {', '.join(json.loads(r[5])[:3]) or '-'};"
+                          f" {r[6]}] {r[3]} — {r[4]}" for i, r in enumerate(batch))
+        try:
+            r = client.chat.completions.create(
+                model=MODEL, response_format={"type": "json_object"}, max_tokens=3000,
+                extra_body={"thinking": {"type": "disabled"}},
+                messages=[{"role": "user", "content": AREA_PROMPT.format(
+                    areas=areas, notes=notes, keys=", ".join(AREAS), items=lines)}])
+            return batch, json.loads(r.choices[0].message.content).get("items", []), r.usage
+        except Exception:      # refusal or bad JSON: these stay unsorted until the next run
+            return batch, [], None
+
+    out, tin, tout, counts = [], 0, 0, {}
+    with cf.ThreadPoolExecutor(16) as ex:
+        for batch, res, usage in ex.map(ask, [rows[i:i + AREA_BATCH] for i in range(0, len(rows), AREA_BATCH)]):
+            if usage:
+                tin, tout = tin + usage.prompt_tokens, tout + usage.completion_tokens
+            for o in res:
+                i, area = o.get("i"), o.get("area")
+                if isinstance(i, int) and 0 <= i < len(batch) and area in AREAS:
+                    out.append((batch[i][0], area, MODEL))
+                    counts[area] = counts.get(area, 0) + 1
+    conn.executemany("INSERT OR REPLACE INTO CommitmentArea VALUES (?,?,?)", out)
+    conn.commit()
+    print(f"areas for {len(out)} of {len(rows)} items: "
+          + ", ".join(f"{k} {v}" for k, v in sorted(counts.items(), key=lambda x: -x[1]))
+          + f" | tokens in {tin:,} out {tout:,}")
+
+
 def main(a):
     client = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
     conn = connect_index()
+    classify_areas(conn, client)
+    if a.areas_only:
+        return
     todo = current(conn, a.recheck)
     if a.limit:
         todo = dict(list(todo.items())[:a.limit])
@@ -145,4 +220,5 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--recheck", action="store_true", help="ask again about items judged pending before")
     ap.add_argument("--limit", type=int, default=0, help="only this many conversations (a test run)")
+    ap.add_argument("--areas-only", action="store_true", help="only give items without one an area of life")
     main(ap.parse_args())

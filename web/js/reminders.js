@@ -3,12 +3,31 @@ import { $, api, esc, dot, fmtDate, relDay, daysBetween, todayIST, toast, markdo
 import { openDrawer } from './reader.js';
 
 const PAGE = 200;
+// areas of life (scripts/index/triage_inbox.py), in the order they're shown
+const AREAS = {
+  relationship: ['💞', 'Relationship'], family: ['🏠', 'Family'], friends: ['🫂', 'Friends'], work: ['💼', 'Work'],
+  study: ['🎓', 'College & study'], projects: ['🛠️', 'Projects'], health: ['🩺', 'Health'], errands: ['🧾', 'Errands & money'],
+  other: ['•', 'Other'],
+};
+const areaTag = a => `<span class="area-tag a-${a}">${AREAS[a]?.[0] || '•'} ${esc(AREAS[a]?.[1] || a)}</span>`;
 
 export class Reminders {
   constructor() {
-    this.owner = 'me'; this.status = 'now'; this.q = ''; this.items = []; this.offset = 0; this.loaded = false;
+    this.owner = 'me'; this.status = 'now'; this.q = ''; this.area = ''; this.items = []; this.offset = 0; this.loaded = false;
+    try { this.groupBy = localStorage.getItem('sarthink.remGroup') || 'area'; } catch { this.groupBy = 'area'; }
+    $('rem-groupby').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === this.groupBy));
     seg('rem-owner', v => { this.owner = v; this.load(); });
     seg('rem-status', v => { this.status = v; this.load(); });
+    seg('rem-groupby', v => {
+      this.groupBy = v; this.render();
+      try { localStorage.setItem('sarthink.remGroup', v); } catch { /* storage blocked */ }
+    });
+    $('rem-areas').addEventListener('click', e => {
+      const b = e.target.closest('[data-area]');
+      if (!b) return;
+      this.area = this.area === b.dataset.area ? '' : b.dataset.area;
+      this.load();
+    });
     let t;
     $('rem-q').addEventListener('input', e => { clearTimeout(t); t = setTimeout(() => { this.q = e.target.value.trim(); this.load(); }, 220); });
     $('rem-list').addEventListener('click', e => this.onClick(e));
@@ -29,12 +48,15 @@ export class Reminders {
   async load(more = false) {
     const list = $('rem-list');
     if (!more) { this.offset = 0; this.items = []; list.innerHTML = '<div class="rem-card">' + '<div class="rem"><span></span><div class="skeleton" style="height:16px;width:60%"></div><span></span></div>'.repeat(5) + '</div>'; }
-    const qs = new URLSearchParams({ owner: this.owner, status: this.status, q: this.q, limit: PAGE, offset: this.offset });
+    const qs = new URLSearchParams({ owner: this.owner, status: this.status, q: this.q, area: this.area, limit: PAGE, offset: this.offset });
     let d;
     try { d = await api('/api/commitments?' + qs); } catch (e) {
       list.innerHTML = `<p class="placeholder">Couldn't load reminders (${esc(e.message)}).</p>`; return;
     }
     this.items.push(...d.items); this.offset += d.items.length; this.total = d.counts.total;
+    const ac = d.counts.areas || {}, all = Object.values(ac).reduce((a, b) => a + b, 0);
+    $('rem-areas').innerHTML = `<button data-area="" class="${this.area ? '' : 'on'}">All <span>${all}</span></button>` +
+      Object.keys(AREAS).filter(k => ac[k]).map(k => `<button data-area="${k}" class="a-${k}${this.area === k ? ' on' : ''}">${AREAS[k][0]} ${esc(AREAS[k][1])} <span>${ac[k]}</span></button>`).join('');
     $('rem-sub').textContent = `${d.counts.total.toLocaleString()} ${this.status === 'all' ? '' : labelOf(this.status) + ' '}· ${d.counts.mine.toLocaleString()} yours, ${d.counts.theirs.toLocaleString()} from others · ${d.counts.with_due.toLocaleString()} with a date`;
     this.render();
   }
@@ -44,7 +66,20 @@ export class Reminders {
     if (!this.items.length) {
       list.innerHTML = `<p class="placeholder">${this.q ? 'Nothing matches that filter.' : 'Nothing here.'}</p>`; return;
     }
-    const today = todayIST(), groups = { overdue: [], week: [], later: [], none: [] };
+    const today = todayIST(), open = ['now', 'cleared', 'older'].includes(this.status);
+    const more = this.offset < this.total ? `<button class="ghost-btn more" data-more>Show more (${(this.total - this.offset).toLocaleString()} left)</button>` : '';
+    if (this.groupBy === 'area' && !this.area) {          // one section per area of life, soonest due first inside
+      const by = {};
+      for (const it of this.items) (by[it.area] = by[it.area] || []).push(it);
+      const order = it => it.due ? `0${it.due}` : `1${9999 - +it.said_on.slice(0, 4)}${it.said_on}`;
+      list.innerHTML = Object.keys(AREAS).filter(k => by[k]).map(k => `
+        <div class="rem-group area-group a-${k}">
+          <h3>${AREAS[k][0]} ${esc(AREAS[k][1])} <span class="c">${by[k].length}</span></h3>
+          <div class="rem-card">${by[k].sort((a, b) => order(a).localeCompare(order(b))).map(it => this.row(it, today, true)).join('')}</div>
+        </div>`).join('') + more;
+      return;
+    }
+    const groups = { overdue: [], week: [], later: [], none: [] };
     for (const it of this.items) {
       if (!it.due) groups.none.push(it);
       else {
@@ -56,17 +91,15 @@ export class Reminders {
     groups.week.sort((a, b) => a.due.localeCompare(b.due));
     groups.later.sort((a, b) => a.due.localeCompare(b.due));
     groups.none.sort((a, b) => b.said_on.localeCompare(a.said_on));
-    const open = ['now', 'cleared', 'older'].includes(this.status);
     const names = { overdue: open ? 'Past due' : 'Was due', week: 'This week', later: 'Later', none: 'No date' };
     list.innerHTML = Object.entries(groups).filter(([, v]) => v.length).map(([k, v]) => `
       <div class="rem-group ${open ? k : ''}">
         <h3>${names[k]} <span class="c">${v.length}</span></h3>
         <div class="rem-card">${v.map(it => this.row(it, today)).join('')}</div>
-      </div>`).join('') +
-      (this.offset < this.total ? `<button class="ghost-btn more" data-more>Show more (${(this.total - this.offset).toLocaleString()} left)</button>` : '');
+      </div>`).join('') + more;
   }
 
-  row(it, today) {
+  row(it, today, inArea = false) {
     const dd = it.due ? daysBetween(today, it.due) : null;
     const isOpen = ['now', 'older'].includes(it.status);
     const cls = !isOpen || dd === null ? '' : dd < 0 ? 'over' : dd <= 3 ? 'soon' : '';
@@ -83,6 +116,7 @@ export class Reminders {
         <div class="title">${esc(it.title)}</div>
         ${it.what && it.what.toLowerCase() !== it.title.toLowerCase() ? `<div class="what">${esc(it.what)}</div>` : ''}
         <div class="meta">
+          ${inArea ? '' : areaTag(it.area)}
           <span class="owner">${esc(who)}</span>
           ${others.length ? `<span>with ${esc(others.join(', '))}${it.people.length - 1 > others.length ? ' +' + (it.people.length - 1 - others.length) : ''}</span>` : ''}
           <span>${dot(it.platform)} said ${esc(fmtDate(it.said_on))}</span>

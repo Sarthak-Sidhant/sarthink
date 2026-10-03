@@ -559,3 +559,18 @@ button:disabled { opacity: .5; cursor: default; }
 #graph-legend i.ring { background: conic-gradient(var(--series-6) 0 33%, var(--series-1) 0 66%, var(--series-3) 0);
   -webkit-mask: radial-gradient(circle, transparent 38%, #000 42%); mask: radial-gradient(circle, transparent 38%, #000 42%); }
 .rem .meta .cleared { color: var(--text-2); font-style: italic; }
+
+/* Reminders by area of life */
+.area-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -8px 0 18px; }
+.area-chips button { height: 28px; padding: 0 11px; border-radius: 999px; font-size: 12.5px; color: var(--text-2);
+  border: 1px solid var(--border); background: var(--surface); display: inline-flex; align-items: center; gap: 5px; }
+.area-chips button span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.area-chips button:hover { color: var(--text); border-color: var(--border-strong); }
+.area-chips button.on { color: var(--text); border-color: var(--area, var(--accent)); box-shadow: inset 0 0 0 1px var(--area, var(--accent)); }
+.area-tag { display: inline-flex; align-items: center; gap: 3px; padding: 0 7px; border-radius: 999px; font-size: 11px;
+  color: var(--text-2); background: color-mix(in srgb, var(--area, var(--muted)) 14%, transparent); }
+.area-group h3 { color: var(--text); }
+.area-group .rem-card { border-left: 3px solid var(--area, var(--border)); }
+.a-relationship { --area: #e0559e; } .a-family { --area: #f0b429; } .a-friends { --area: #22a565; }
+.a-work { --area: #3a9ff0; } .a-study { --area: #6366f1; } .a-projects { --area: #f26b3a; }
+.a-health { --area: #14a3a3; } .a-errands { --area: #8a94a6; } .a-other { --area: var(--muted); }
