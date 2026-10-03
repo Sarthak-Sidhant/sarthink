@@ -42,6 +42,7 @@ from common import DATA_DIR, EMBED_MODEL, GRAPH_DIR, PROFILE_CACHE, USER_DB, con
 from search import Searcher  # noqa: E402
 from agent import Agent  # noqa: E402
 from people import ME, PeopleStore  # noqa: E402
+from themes import subject as theme_subject  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 SUMMARY_MODEL, SUMMARY_VERSION = "deepseek-flash", "v3"
@@ -396,7 +397,7 @@ def _agent():
     return AGENT
 
 
-DOSSIER_VERSION = "v3"   # v3: dossiers of accounts and of people (groups of accounts)
+DOSSIER_VERSION = "v4"   # v4: a person's themes are their accounts' themes
 _DOSSIER_LOCK = threading.Lock()
 
 
@@ -433,9 +434,45 @@ def _dossier(sc, refresh=False):
     return {**d, "cached": False}
 
 
+THEMES_SHOWN = 8
+
+
+def _theme_examples(theme_lists):
+    """Date, header and summary of the last 3 sessions of each theme: one query for all of them."""
+    want = [sid for ts in theme_lists for t in ts for sid in t["session_ids"][-3:]]
+    brief = {}
+    if want:
+        with LOCK:
+            for sid, start, end, header, data in S.conn.execute(f"""
+                    SELECT s.session_id, s.start_ts, s.end_ts, s.header, x.data FROM Sessions s
+                    LEFT JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model = ? AND x.prompt_version = ?
+                    WHERE s.session_id IN ({",".join("?" * len(want))})""", (SUMMARY_MODEL, SUMMARY_VERSION, *want)):
+                brief[sid] = {"session_id": sid, "date": iso(start)[:10], "header": ist_header(header, start, end),
+                              "summary": json.loads(data).get("summary") if data else None}
+    return [[{"theme": t["theme"], "description": t["description"], "example": t.get("example"), "sessions": t["sessions"],
+              "topics": t.get("topics", []), "examples": [brief[sid] for sid in t["session_ids"][-3:] if sid in brief]}
+             for t in ts] for ts in theme_lists]
+
+
+def _shared_themes(account_themes):
+    """Themes on different accounts of one person that share a subject (not just 'banter' or 'twitter')."""
+    links = []
+    for i, a in enumerate(account_themes):
+        for b in account_themes[i + 1:]:
+            for x, ta in enumerate(a["themes"]):
+                for y, tb in enumerate(b["themes"]):
+                    shared = sorted(k for k in set(ta["topics"]) & set(tb["topics"]) if theme_subject(k))
+                    if shared:
+                        links.append({"a": f"{a['node']}:{x}", "b": f"{b['node']}:{y}", "shared": shared[:4]})
+    return links
+
+
 def _build_dossier(sc):
+    """One account: its stats and themes. A person: totals, activity and chats over all their accounts, and the
+    themes of each account under that account (themes belong to accounts; a person is made of accounts)."""
     ag = _agent()
-    prof = ag.profiles.get(sc["scope"], sc["account_ids"], sc["name"])
+    person = sc["kind"] == "person"
+    prof = ag.profiles.get(sc["scope"], sc["account_ids"], sc["name"], themes=not person)
     q = lambda sql, args=(): ag.sql.conn.execute(sql, args).fetchall()  # noqa: E731
     threads = ag.profiles.threads(sc["account_ids"])     # takes ag.sql.lock itself, so not inside the block below
     tj = json.dumps(threads)            # one parameter: a person can span tens of thousands of chats
@@ -445,28 +482,31 @@ def _build_dossier(sc):
         chats = q("""SELECT thread_id, MAX(thread), MAX(platform), COUNT(*), MIN(day), MAX(day) FROM msg_stats
                      WHERE thread_id IN (SELECT value FROM json_each(?)) GROUP BY thread_id ORDER BY COUNT(*) DESC LIMIT 5""",
                   (tj,))
-    shown = prof.get("themes", [])[:8]
-    want = [sid for t in shown for sid in t["session_ids"][-3:]]
-    brief = {}
-    if want:          # only what an example card shows: one query, not a full session() per example
-        with LOCK:
-            for sid, start, end, header, data in S.conn.execute(f"""
-                    SELECT s.session_id, s.start_ts, s.end_ts, s.header, x.data FROM Sessions s
-                    LEFT JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model = ? AND x.prompt_version = ?
-                    WHERE s.session_id IN ({",".join("?" * len(want))})""", (SUMMARY_MODEL, SUMMARY_VERSION, *want)):
-                brief[sid] = {"session_id": sid, "date": iso(start)[:10], "header": ist_header(header, start, end),
-                              "summary": json.loads(data).get("summary") if data else None}
-    themes = [{"theme": t["theme"], "description": t["description"], "sessions": t["sessions"],
-               "examples": [brief[sid] for sid in t["session_ids"][-3:] if sid in brief]} for t in shown]
-    return {"kind": sc["kind"], "id": sc["id"], "node": sc["node"], "name": sc["name"],
-            "platforms": prof.get("platforms"), "messages_total": prof.get("messages_total"),
-            "messages_by_you": prof.get("messages_by_sarthak"), "messages_by_them": prof.get("messages_by_them"),
-            "first_day": prof.get("first_day"), "last_day": prof.get("last_day"),
-            "months": [{"month": m, "total": n, "you": y} for m, n, y in months],
-            "top_chats": [{"node": f"T_{t}", "title": re.sub(r"\s*\[\d+\]", "", ti or ""), "platform": p,
-                           "messages": n, "from": a, "to": b}
-                          for t, ti, p, n, a, b in chats],
-            "themes": themes}
+    out = {"kind": sc["kind"], "id": sc["id"], "node": sc["node"], "name": sc["name"],
+           "platforms": prof.get("platforms"), "messages_total": prof.get("messages_total"),
+           "messages_by_you": prof.get("messages_by_sarthak"), "messages_by_them": prof.get("messages_by_them"),
+           "first_day": prof.get("first_day"), "last_day": prof.get("last_day"),
+           "months": [{"month": m, "total": n, "you": y} for m, n, y in months],
+           "top_chats": [{"node": f"T_{t}", "title": re.sub(r"\s*\[\d+\]", "", ti or ""), "platform": p,
+                          "messages": n, "from": a, "to": b} for t, ti, p, n, a, b in chats]}
+    if not person:
+        out["themes"] = _theme_examples([prof.get("themes", [])[:THEMES_SHOWN]])[0]
+        return out
+    accts = []
+    for a in sc["accounts"]:
+        if not a["messages"]:
+            continue
+        ap = ag.profiles.get(f"A:{a['account_id']}", [a["account_id"]], a["name"])
+        accts.append({"node": a["node"], "account_id": a["account_id"], "name": a["name"], "platform": a["platform"],
+                      "messages_total": ap.get("messages_total"), "messages_by_you": ap.get("messages_by_sarthak"),
+                      "messages_by_them": ap.get("messages_by_them"), "first_day": ap.get("first_day"),
+                      "last_day": ap.get("last_day"), "themes": ap.get("themes", [])[:6]})
+    for a, ts in zip(accts, _theme_examples([a["themes"] for a in accts])):
+        a["themes"] = ts
+    out["themes"] = []                   # a person has no blended themes: see account_themes
+    out["account_themes"] = accts
+    out["shared_themes"] = _shared_themes(accts)
+    return out
 
 
 # ─── Accounts and people (docs/accounts-and-people.md) ──────────────────────────────────────────────────
@@ -856,10 +896,11 @@ if __name__ == "__main__":
     PEOPLE.import_merges(DATA_DIR / "person_merges.json")      # a hand-written list, imported once
     print(f"Data: {DATA_DIR} | {len(S.ids)} chunks | encoder: {S.encoder_url or 'local ' + a.model + ' model'}")
 
-    def _warm():          # your own dossier spans the whole archive (~40s to build): have it ready, not on first click
-        try:
-            people_dossier(ME)
-        except Exception as e:
-            print(f"[warm-up] your dossier: {type(e).__name__}: {e}")
+    def _warm():          # dossiers take ~30-40s to build (yours spans the whole archive): have them ready, not on
+        for pid in [ME] + [p for p in PEOPLE.people() if p != ME]:      # first click (cached after)
+            try:
+                people_dossier(pid)
+            except Exception as e:
+                print(f"[warm-up] person {pid}: {type(e).__name__}: {e}")
     threading.Thread(target=_warm, daemon=True).start()
     uvicorn.run(app, host="127.0.0.1", port=a.port)

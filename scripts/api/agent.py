@@ -105,9 +105,10 @@ TOOLS = [
         }, "required": ["session_id"]}}},
     {"type": "function", "function": {
         "name": "person_overview",
-        "description": "Everything-at-a-glance for one person, computed over ALL conversations with them: exact "
-                       "message counts, first/last contact, platforms, busiest months, and recurring THEMES "
-                       "(each with example conversations as numbered sources). Use it for 'what do X and I talk "
+        "description": "Everything-at-a-glance for one person or account, computed over ALL conversations: exact "
+                       "message counts, first/last contact, platforms, busiest months, and recurring THEMES with "
+                       "example conversations as numbered sources. For a person, themes come per account "
+                       "(by_account), since each account is a different place you talk. Use it for 'what do X and I talk "
                        "about', 'tell me about my friendship with X', 'how did things with X change'.",
         "parameters": {"type": "object", "properties": {
             "person": {"type": "string", "description": "name, P_<id> (person: all their accounts) or A_<id> (one account)"}},
@@ -308,7 +309,7 @@ class Profiles:
     accounts of a person. Cached on disk per scope ("A:<id>" / "P:<id>") until the accounts in it, their message
     counts or the summaries change, so attaching an account to a person refreshes that person's profile."""
 
-    def __init__(self, sql, version="v3"):      # v3: scopes over accounts (people = groups of accounts)
+    def __init__(self, sql, version="v4"):      # v4: themes per account, named by merged topics, where + when
         self.sql, self.version = sql, version
         self.cache = sqlite3.connect(PROFILE_CACHE, check_same_thread=False)
         self.cache.execute("CREATE TABLE IF NOT EXISTS ScopeProfiles (scope TEXT, version TEXT, data TEXT, "
@@ -320,17 +321,20 @@ class Profiles:
             return self.sql.conn.execute(sql, args).fetchall()
 
     def _sessions(self, account_ids):
-        return self._q("""SELECT s.session_id, s.start_ts, x.data FROM Sessions s
+        return self._q("""SELECT s.session_id, s.start_ts, x.data,
+                   (SELECT t.title FROM src.Threads t WHERE t.id = json_extract(s.thread_ids, '$[0]')) AS title
+            FROM Sessions s
             JOIN SessionSummaries x ON x.session_id = s.session_id AND x.model='deepseek-flash' AND x.prompt_version='v3'
             WHERE EXISTS (SELECT 1 FROM json_each(s.account_ids) j WHERE j.value IN (SELECT value FROM json_each(?)))
             ORDER BY s.start_ts""", (json.dumps(list(account_ids)),))
 
-    def get(self, scope, account_ids, name):
+    def get(self, scope, account_ids, name, themes=True):
+        """themes=False (a person): totals only; a person's themes are their accounts' themes."""
         account_ids = sorted(set(account_ids))
         msgs = self._q("SELECT COALESCE(SUM(message_count), 0) FROM main.Accounts WHERE account_id IN "
                        "(SELECT value FROM json_each(?))", (json.dumps(account_ids),))[0][0]
         sessions = self._sessions(account_ids)
-        fp = [account_ids, msgs, len(sessions)]
+        fp = [account_ids, msgs, len(sessions), themes]
         with self.lock:
             row = self.cache.execute("SELECT data FROM ScopeProfiles WHERE scope=? AND version=?",
                                      (scope, self.version)).fetchone()
@@ -338,7 +342,7 @@ class Profiles:
             prof = json.loads(row[0])
             prof["name"] = name                      # names change without the data changing
             return prof
-        prof = self._build(account_ids, name, sessions)
+        prof = self._build(account_ids, name, sessions, themes)
         prof["fingerprint"] = fp
         with self.lock:
             self.cache.execute("INSERT OR REPLACE INTO ScopeProfiles VALUES (?,?,?)",
@@ -357,7 +361,7 @@ class Profiles:
             WHERE au.account_id IN (SELECT value FROM json_each(?1))
               AND NOT EXISTS (SELECT 1 FROM AccountThreads x WHERE x.user_id = au.user_id)""", (aj,))]
 
-    def _build(self, account_ids, name, sessions):
+    def _build(self, account_ids, name, sessions, themes=True):
         threads = self.threads(account_ids)
         if not threads:
             return {"name": name, "account_ids": account_ids, "messages_total": 0, "themes": []}
@@ -372,7 +376,7 @@ class Profiles:
                 "messages_total": stats[0], "messages_by_sarthak": stats[1], "messages_by_them": stats[2],
                 "first_day": stats[3], "last_day": stats[4],
                 "busiest_months": [{"month": m, "messages": n} for m, n in months],
-                "sessions_summarized": len(sessions), "themes": self._themes(sessions)}
+                "sessions_summarized": len(sessions), "themes": self._themes(sessions) if themes else []}
 
     def _themes(self, sessions):
         """Recurring themes of these sessions, computed locally from their vectors and summary topics (themes.py)."""
@@ -660,15 +664,31 @@ class Agent:
     def _overview(self, sources, person):
         try:
             sc = self.backend.resolve(str(person))          # person (all accounts) or one account
-            prof = self.profiles.get(sc["scope"], sc["account_ids"], sc["name"])
+            is_person = sc["kind"] == "person"
+            prof = self.profiles.get(sc["scope"], sc["account_ids"], sc["name"], themes=not is_person)
         except Exception as e:
             return {"error": str(e)[:300]}
         out = {k: v for k, v in prof.items() if k not in ("themes", "fingerprint", "account_ids")}
         out["node"] = sc["node"]
-        if sc["kind"] == "person":
-            out["accounts"] = sc.get("accounts", [])
-        out["themes"] = []
-        for t in prof.get("themes", []):
+        if not is_person:
+            out["themes"] = self._themes_with_examples(sources, prof.get("themes", []))
+            return out
+        # a person: totals over all their accounts; themes belong to each account
+        out["by_account"] = []
+        for a in sc.get("accounts", []):
+            if not a.get("messages"):
+                continue
+            ap = self.profiles.get(f"A:{a['account_id']}", [a["account_id"]], a["name"])
+            out["by_account"].append({"account": a["name"], "platform": a["platform"],
+                                      "messages_total": ap.get("messages_total"),
+                                      "messages_by_them": ap.get("messages_by_them"),
+                                      "first_day": ap.get("first_day"), "last_day": ap.get("last_day"),
+                                      "themes": self._themes_with_examples(sources, ap.get("themes", [])[:6])})
+        return out
+
+    def _themes_with_examples(self, sources, themes):
+        out = []
+        for t in themes:
             examples = []
             for sid in t["session_ids"][-3:]:          # most recent examples
                 try:
@@ -677,8 +697,8 @@ class Agent:
                     continue
                 n = self._register(sources, ("session", sid), {"kind": "conversation", **sess})
                 examples.append({"n": n, "date": fmt_date(sess["start"]), "session_id": sid})
-            out["themes"].append({"theme": t["theme"], "description": t["description"],
-                                  "sessions": t["sessions"], "examples": examples})
+            out.append({"theme": t["theme"], "where_when": t["description"], "example": t.get("example"),
+                        "sessions": t["sessions"], "examples": examples})
         return out
 
     def _remember(self, note, person=None, topic=None, keywords=None):

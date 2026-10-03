@@ -85,6 +85,81 @@ def _norm_topic(t):
     return re.sub(r"\s+", " ", str(t)).strip().lower()
 
 
+STOP = {"and", "the", "of", "with", "about", "for", "to", "in", "on", "a", "an", "chat", "chats", "talk", "talks",
+        "discussion", "discussions", "conversation", "conversations", "casual", "general", "some", "various"}
+# words that say where or how people talk, not what about: two themes sharing only these share no subject
+GENERIC = {"twitter", "tweet", "reddit", "whatsapp", "discord", "instagram", "facebook", "telegram", "dm", "group",
+           "banter", "exchange", "argument", "thread", "reply", "repli", "joke", "meme", "mem", "link", "messag",
+           "friend", "friendly", "teas", "roast", "humor", "humour", "greet", "update", "plan", "sarthak"}
+
+
+def subject(key):
+    """True if a theme topic key (space-separated stemmed words) names a subject, not just a medium or a tone."""
+    return any(w not in GENERIC for w in key.split())
+
+
+MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _stem(w):
+    for suf in ("ing", "ed", "es", "s", "y"):
+        if len(w) > 4 and w.endswith(suf):
+            return w[: -len(suf)]
+    return w
+
+
+def _canon(t):
+    """A topic phrase's meaning, for spotting near-duplicates: its content words, stemmed.
+    "group chat banter" = "group banter"; "flirty banter" = "flirting and banter"."""
+    words = [w for w in re.findall(r"[^\W\d_]{2,}", t.lower()) if w not in STOP]
+    return frozenset(_stem(w) for w in words) or frozenset([t.lower()])
+
+
+def _similar(a, b):
+    return a <= b or b <= a
+
+
+def _chat_title(title):
+    """A chat's title, or None when it is only an id ("Tweet Thread 123", "DM 1-2", "Ghost Thread 9")."""
+    t = re.sub(r"\s*\[\d+\]", "", title or "").strip()
+    if not t or re.match(r"^(tweet|ghost|reddit) (thread|post)\b|^dm \d|^\d+$", t, re.I):
+        return None
+    return re.sub(r"^Direct Messages - ", "DMs with ", t)
+
+
+def _span(tss):
+    import datetime as dt
+    d = [dt.datetime.utcfromtimestamp(t) for t in tss if t]
+    if not d:
+        return ""
+    a, b = min(d), max(d)
+    f = lambda x: f"{MONTHS[x.month - 1]} {x.year}"  # noqa: E731
+    if (a.year, a.month) == (b.year, b.month):
+        return f(a)
+    return f"{MONTHS[a.month - 1]} – {f(b)}" if a.year == b.year else f"{f(a)} – {f(b)}"
+
+
+def _where(idx, titles):
+    """Where a theme happens: its main chat, or how many chats it spans."""
+    named = Counter(t for t in (_chat_title(titles[i]) for i in idx) if t)
+    chats = len({titles[i] for i in idx})
+    if named:
+        top, n = named.most_common(1)[0]
+        if n >= 0.5 * len(idx):
+            return f"Mostly in “{top}”"
+        return f"In “{top}” and {chats - 1} other chat{'s' if chats > 2 else ''}" if chats > 1 else f"In “{top}”"
+    kinds = Counter(_kind(titles[i]) for i in idx)
+    noun = kinds.most_common(1)[0][0] if kinds else "chat"
+    return f"Across {chats} {noun}{'s' if chats > 1 else ''}"
+
+
+def _kind(title):
+    """What an untitled chat is: a tweet thread, a Reddit thread, a DM."""
+    t = (title or "").lower()
+    return ("tweet thread" if re.match(r"^(tweet|ghost) thread", t) else "Reddit thread" if t.startswith("reddit")
+            else "DM" if re.match(r"^dm\b", t) else "chat")
+
+
 def _first_sentence(text, cap=180):
     text = re.sub(r"\s+", " ", text or "").strip()
     m = re.match(r"(.{20,}?[.!?])(\s|$)", text)
@@ -106,7 +181,9 @@ def _describe(idx, X, centre, data, topics, names):
 
 
 def themes(sessions, chunk_rows):
-    """sessions: [(session_id, start_ts, summary json)], chunk_rows: [(session_id, chunk_id)] for those sessions."""
+    """sessions: [(session_id, start_ts, summary json[, chat title])], chunk_rows: [(session_id, chunk_id)].
+    Each theme: name (its distinctive topics), description (where and when), an example sentence, its main
+    topics (to link similar themes across accounts) and its sessions."""
     if len(sessions) < 2:
         return []
     keep, X = _session_vectors(sessions, chunk_rows)
@@ -114,34 +191,45 @@ def themes(sessions, chunk_rows):
     if n < 2:
         return []
     data = [json.loads(s[2]) for s in keep]
+    titles = [s[3] if len(s) > 3 else "" for s in keep]
     topics = [[t for t in (d.get("topics") or []) if str(t).strip()] for d in data]
+    keys = [{_canon(_norm_topic(t)) for t in ts} for ts in topics]
     k = max(1, min(MAX_THEMES, round(math.sqrt(n / 3)), n // 2))
     labels, C = _kmeans(X, k) if k > 1 else (np.zeros(n, dtype=int), X.mean(axis=0, keepdims=True))
 
-    overall = Counter(_norm_topic(t) for ts in topics for t in set(ts))
-    shown = {}                                   # most common original casing of each topic
+    overall = Counter(c for ks in keys for c in ks)
+    shown = {}                                   # the most common wording of each topic (near-duplicates merged)
     for ts in topics:
         for t in ts:
-            shown.setdefault(_norm_topic(t), Counter())[str(t).strip()] += 1
-    out, used = [], set()
+            shown.setdefault(_canon(_norm_topic(t)), Counter())[str(t).strip()] += 1
+    out, used = [], []
     for j in sorted(range(k), key=lambda j: -int((labels == j).sum())):
         idx = np.flatnonzero(labels == j)
         if len(idx) < max(2, round(0.02 * n)):
             continue                             # one-off conversations are noise, as before
-        inside = Counter(_norm_topic(t) for i in idx for t in set(topics[i]))
+        inside = Counter(c for i in idx for c in keys[i])
         rest = n - len(idx)
         score = {}
         for t, c in inside.items():
-            if c < min(2, len(idx)) or t in used:
+            if c < min(2, len(idx)) or any(_similar(t, u) for u in used):
                 continue
             fin, fout = c / len(idx), ((overall[t] - c) / rest) if rest else 0.0
             score[t] = fin * math.log((fin + 0.01) / (fout + 0.01))   # common here, rare elsewhere
-        names = [t for t, v in sorted(score.items(), key=lambda x: (-x[1], x[0])) if v > 0][:3]
+        names = []
+        for t, v in sorted(score.items(), key=lambda x: (-x[1], sorted(x[0]))):
+            if v <= 0 or len(names) == 3:
+                break
+            if not any(_similar(t, u) for u in names):
+                names.append(t)
         if not names:
             continue
-        used.update(names)
-        out.append({"theme": " · ".join(shown[t].most_common(1)[0][0] for t in names),
-                    "description": _describe(idx, X, C[j], data, topics, names),
+        used.extend(names)
+        words = [shown[t].most_common(1)[0][0] for t in names]
+        when = _span([keep[i][1] for i in idx])
+        out.append({"theme": " · ".join(words),
+                    "description": _where(idx, titles) + (f" · {when}" if when else ""),
+                    "example": _describe(idx, X, C[j], data, topics, {_norm_topic(w) for w in words}),
+                    "topics": [" ".join(sorted(t)) for t, _ in inside.most_common(8)],
                     "sessions": len(idx), "session_ids": [keep[i][0] for i in sorted(idx, key=lambda i: keep[i][1])]})
     out.sort(key=lambda t: -t["sessions"])
     return out

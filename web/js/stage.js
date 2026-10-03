@@ -96,7 +96,7 @@ export class Stage {
     if (!m) { $('focus-bar').hidden = true; this.highlight([d.node, ...d.top_chats.map(c => c.node)], { focus: [d.node] }); return; }
     const spec = m.specFromPerson(d, this.graph);
     const sessions = spec.nodes.filter(n => n.kind === 'session').length;
-    this._focusMode(spec, `<b>${esc(cleanName(d.name))}</b> · ${num(d.messages_total)} messages · ${d.themes.length} themes · ${sessions} conversations`);
+    this._focusMode(spec, `<b>${esc(cleanName(d.name))}</b> · ${num(d.messages_total)} messages · ${spec.nodes.filter(n => n.kind === 'theme').length} themes · ${sessions} conversations`);
   }
 
   clear() {

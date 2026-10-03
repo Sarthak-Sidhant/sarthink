@@ -93,30 +93,49 @@ export function enrichSpec(spec, dossiers, graph) {
   return { ...spec, nodes, links: dedupe(links) };
 }
 
+// a person: you → them → each of their accounts → that account's themes → example conversations.
+// Themes belong to accounts; a faint link joins two themes on different accounts that share a subject.
+// An account (or a person dossier without account_themes) hangs its themes off itself.
 export function specFromPerson(d, graph) {
   const meId = graph.meId, pid = d.node, info = graph.infoById(pid);
   const nodes = [
     { id: meId, kind: 'me', label: 'You' },
     { id: pid, kind: 'person', platform: info?.platform, label: cleanName(d.name), size: d.messages_total, ref: d.node },
   ];
-  const links = [[meId, pid]];
-  for (const c of d.top_chats.slice(0, 5)) {
-    if (nodes.some(n => n.id === c.node)) continue;
-    nodes.push({ id: c.node, kind: 'chat', platform: c.platform, label: chatName(c.title, c.platform), size: c.messages });
-    links.push([pid, c.node]);
+  const links = [[meId, pid]], has = id => nodes.some(n => n.id === id);
+  const accts = (d.account_themes || []).filter(a => a.messages_total);
+  for (const a of accts) {
+    nodes.push({ id: a.node, kind: 'person', platform: a.platform, label: cleanName(a.name), size: a.messages_total, ref: a.node });
+    links.push([pid, a.node]);
   }
-  d.themes.slice(0, 6).forEach((t, k) => {
-    const tid = `TH_${d.node}_${k}`;
-    nodes.push({ id: tid, kind: 'theme', label: t.theme, title: t.description, size: t.sessions });
-    links.push([pid, tid]);
-    for (const e of t.examples) {
-      const sid = `S_${e.session_id}`;
-      if (!nodes.some(n => n.id === sid)) {
-        nodes.push({ id: sid, kind: 'session', platform: info?.platform, label: shortDate(e.date), title: sessionTitle(e.header), date: e.date, snippet: e.summary, session: e.session_id });
+  const ownerOf = chat => accts.find(a => graph.neighbours(chat).includes(a.node))?.node || pid;
+  for (const c of d.top_chats.slice(0, 5)) {
+    if (has(c.node)) continue;
+    nodes.push({ id: c.node, kind: 'chat', platform: c.platform, label: chatName(c.title, c.platform), size: c.messages });
+    links.push([accts.length ? ownerOf(c.node) : pid, c.node]);
+  }
+  const groups = accts.length ? accts.map(a => ({ node: a.node, platform: a.platform, themes: a.themes }))
+    : [{ node: pid, platform: info?.platform, themes: d.themes }];
+  const total = groups.reduce((n, g) => n + Math.min(4, g.themes.length), 0);
+  const perTheme = total > 8 ? 2 : 3;               // keep the scene readable for people with many accounts
+  for (const g of groups) {
+    g.themes.slice(0, accts.length ? 4 : 6).forEach((t, k) => {
+      const tid = `TH_${g.node}_${k}`;
+      nodes.push({ id: tid, kind: 'theme', label: t.theme, title: t.description, size: t.sessions });
+      links.push([g.node, tid]);
+      for (const e of t.examples.slice(-perTheme)) {
+        const sid = `S_${e.session_id}`;
+        if (!has(sid)) {
+          nodes.push({ id: sid, kind: 'session', platform: g.platform, label: shortDate(e.date), title: sessionTitle(e.header), date: e.date, snippet: e.summary, session: e.session_id });
+        }
+        links.push([tid, sid]);
       }
-      links.push([tid, sid]);
-    }
-  });
+    });
+  }
+  for (const l of d.shared_themes || []) {
+    const [a, b] = [l.a, l.b].map(x => x.replace(/^(.*):(\d+)$/, 'TH_$1_$2'));
+    if (has(a) && has(b)) links.push([a, b, { faint: true }]);
+  }
   return { nodes, links: dedupe(links), focus: pid };
 }
 
@@ -245,10 +264,10 @@ export class Focus3D {
     this.spec = spec; this.focusId = null;
     const dark = document.documentElement.dataset.theme === 'dark';
     const plat = { twitter: css('--series-1'), reddit: css('--series-2'), discord: css('--series-3'), facebook: css('--series-4'), instagram: css('--series-5'), whatsapp: css('--series-6') };
-    const colorOf = n => n.kind === 'me' ? '#9a8cf0' : n.kind === 'theme' ? '#c48ae6' : plat[n.platform] || css('--accent');
+    const colorOf = n => n.kind === 'me' ? '#9a8cf0' : n.kind === 'theme' ? '#c48ae6' : n.ref?.startsWith('P_') ? css('--person') : plat[n.platform] || css('--accent');
     const nodes = spec.nodes.map((n, k) => ({ ...n, k, color: colorOf(n) }));
     this.nodes = nodes; this.byId = new Map(nodes.map(n => [n.id, n]));
-    const links = spec.links.map(([a, b]) => [this.byId.get(a), this.byId.get(b)]).filter(([a, b]) => a && b);
+    const links = spec.links.map(([a, b, o]) => [this.byId.get(a), this.byId.get(b), o?.faint]).filter(([a, b]) => a && b);
     this.links = links;
     this._layout(nodes, links);
 
@@ -287,7 +306,7 @@ export class Focus3D {
     // links: curved, coloured end to end; each carries a particle that flows along it
     this.curves = [];
     const pPos = new Float32Array(links.length * 3), pCol = new Float32Array(links.length * 3);
-    links.forEach(([a, b], i) => {
+    links.forEach(([a, b, faint], i) => {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(20 * 3), 3));
       const cols = new Float32Array(20 * 3), ca = new THREE.Color(a.color), cb = new THREE.Color(b.color);
@@ -296,7 +315,7 @@ export class Focus3D {
       const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0, depthWrite: false }));
       line.renderOrder = 0;
       this.group.add(line);
-      this.curves.push({ a, b, line, bend: (Math.random() - 0.5) * 0.5, speed: 0.00018 + Math.random() * 0.00022, off: Math.random() });
+      this.curves.push({ a, b, line, faint, bend: (Math.random() - 0.5) * 0.5, speed: 0.00018 + Math.random() * 0.00022, off: Math.random() });
       const c = cb.clone().lerp(new THREE.Color('#ffffff'), 0.25); pCol.set([c.r, c.g, c.b], i * 3);
     });
     const pg = new THREE.BufferGeometry();
@@ -334,9 +353,9 @@ export class Focus3D {
         tmp.normalize().multiplyScalar(f * cool);
         nodes[i].v.add(tmp); nodes[j].v.sub(tmp);
       }
-      for (const [a, b] of links) {
+      for (const [a, b, faint] of links) {
         tmp.subVectors(b.target, a.target);
-        const d = tmp.length() || 1, f = (d - rest(a.kind, b.kind)) * 0.06 * cool;
+        const d = tmp.length() || 1, f = (d - rest(a.kind, b.kind)) * (faint ? 0.008 : 0.06) * cool;
         tmp.multiplyScalar(f / d);
         a.v.add(tmp); b.v.sub(tmp);
       }
@@ -410,11 +429,11 @@ export class Focus3D {
       c.line.geometry.computeBoundingSphere();
       const live = Math.min(ease((now - c.b.born) / 900), ease((now - c.a.born) / 900));
       const lit = !F || (F.has(c.a.id) && F.has(c.b.id));
-      c.line.material.opacity = live * (lit ? (F ? 0.85 : 0.5) : 0.05);
+      c.line.material.opacity = live * (lit ? (F ? 0.85 : 0.5) : 0.05) * (c.faint ? 0.4 : 1);
       const t = (now * c.speed + c.off) % 1, u = 1 - t;
       pp.array[i * 3] = u * u * a.x + 2 * u * t * q.x + t * t * b.x;
       pp.array[i * 3 + 1] = u * u * a.y + 2 * u * t * q.y + t * t * b.y;
-      pp.array[i * 3 + 2] = (live < 0.9 || !lit) ? 1e5 : u * u * a.z + 2 * u * t * q.z + t * t * b.z;
+      pp.array[i * 3 + 2] = (live < 0.9 || !lit || c.faint) ? 1e5 : u * u * a.z + 2 * u * t * q.z + t * t * b.z;
     });
     pp.needsUpdate = true;
     if (this.camTo) {

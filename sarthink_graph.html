@@ -2217,7 +2217,9 @@
         const max = Math.max(...d.months.map(m => m.total), 1);
         const bars = d.months.map(m => `<div title="${m.month}: ${m.total} messages (${m.you} yours)" style="height:${100 * m.total / max}%">` +
           `<span style="height:${m.total ? 100 * m.you / m.total : 0}%"></span></div>`).join('');
-        const themes = d.themes.map(t => `<div class="ds-theme"><b>${esc(t.theme)}</b><span class="n">${t.sessions} chats</span>
+        // a person's themes belong to their accounts: list them with the platform they come from
+        const themeList = d.account_themes ? d.account_themes.flatMap(a => a.themes.map(t => ({ ...t, theme: `${a.platform}: ${t.theme}` }))) : d.themes;
+        const themes = themeList.map(t => `<div class="ds-theme"><b>${esc(t.theme)}</b><span class="n">${t.sessions} chats</span>
           <div class="d">${esc(t.description || '')}</div>
           ${t.examples.map(e => `<span class="ds-ex" data-session="${esc(e.session_id)}" title="${esc(e.summary || '')}">${esc(e.date)}</span>`).join('')}</div>`).join('');
         const chats = d.top_chats.map(c => `<div class="ds-chat" data-node="${esc(c.node)}">${esc(c.platform)} · ${esc(c.title)} — ${c.messages.toLocaleString()} msgs</div>`).join('');

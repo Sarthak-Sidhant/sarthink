@@ -156,8 +156,9 @@ export class People {
         <h2>Activity <span class="legend"><span><i style="background:var(--series-1)"></i>You</span><span><i style="background:var(--ramp-light)"></i>${isMe ? 'Others' : esc(name)}</span></span></h2>
         <div class="chart" id="act-chart">${activityChart(d.months)}</div>
       </div>` : ''}
-      ${d.themes?.length ? `<div class="section"><h2>What you talk about</h2><div class="themes">${d.themes.map(themeHtml).join('')}</div></div>` : ''}
-      ${isPerson && info.accounts.length > 1 ? '<div class="section" id="p-by-account"><h2>By account <span class="muted acct-count">each account on its own</span></h2><div class="by-acct" id="by-acct"></div></div>' : ''}
+      ${d.themes?.length ? `<div class="section"><h2>What you talk about</h2><div class="themes">${d.themes.map(t => themeHtml(t)).join('')}</div></div>` : ''}
+      ${d.account_themes?.length ? `<div class="section" id="p-by-account"><h2>What you talk about <span class="muted">on each account</span></h2>
+        <div class="by-acct">${d.account_themes.map(a => accountThemes(a, d.shared_themes || [], d.account_themes)).join('')}</div></div>` : ''}
       ${d.top_chats?.length ? `<div class="section"><h2>Where you talk</h2><div class="chats">${d.top_chats.map(c => `
         <div class="chat-row">
           <div><div class="ttl">${dot(c.platform)}<span>${esc(c.title || platformLabel(c.platform))}</span></div>
@@ -165,23 +166,6 @@ export class People {
           <span class="n">${num(c.messages)} msgs</span>
         </div>`).join('')}</div></div>` : ''}`;
     bindChartTips($('act-chart'));
-    if (isPerson && info.accounts.length > 1) this.loadAccountCards(ref, info.accounts);
-  }
-
-  // a person with several accounts: one card per account, each with its own summary
-  async loadAccountCards(ref, accounts) {
-    const box = $('by-acct');
-    box.innerHTML = accounts.map(a => `<details class="acct-card" data-acct="${a.node}"><summary>
-      <span class="ttl">${dot(a.platform)}<b>${esc(cleanName(a.name))}</b><span class="muted">${esc(platformLabel(a.platform))}</span></span>
-      <span class="muted">${num(a.messages)} msgs</span></summary><div class="acct-body"><div class="skeleton" style="height:60px"></div></div></details>`).join('');
-    box.querySelector('details')?.setAttribute('open', '');
-    for (const a of accounts) {
-      getDossier(a.node).then(d => {
-        if (this.current !== ref) return;
-        const body = box.querySelector(`[data-acct="${a.node}"] .acct-body`);
-        if (body) body.innerHTML = accountCardBody(d, a.node);
-      }).catch(() => {});
-    }
   }
 
   // ─── same-name suggestions in one place ───────────────────────────────
@@ -358,24 +342,35 @@ function accountPanel(a) {
   return `<div class="section p-panel">${owner}${suggestionsHtml(a.suggestions, 'Same person on another platform?')}<div class="acct-status muted"></div></div>`;
 }
 
-function themeHtml(t) {
+function themeHtml(t, also = []) {
   return `<div class="theme">
     <div class="t">${esc(t.theme)}<span>${t.sessions} chat${t.sessions === 1 ? '' : 's'}</span></div>
     ${t.description ? `<div class="d">${esc(t.description)}</div>` : ''}
+    ${t.example ? `<div class="eg">“${esc(t.example)}”</div>` : ''}
+    ${also.length ? `<div class="also">${also.map(x => `<span title="Also on ${esc(x.label)}: ${esc(x.theme)}">${dot(x.platform)}also on ${esc(x.label)}</span>`).join('')}</div>` : ''}
     ${t.examples?.length ? `<div class="ex">${t.examples.map(x => `<button data-session="${esc(x.session_id)}" title="${esc(x.summary || x.header)}">${esc(fmtDate(x.date))}</button>`).join('')}</div>` : ''}
   </div>`;
 }
 
-function accountCardBody(d, node) {
-  const pct = d.messages_total ? Math.round(100 * d.messages_by_you / d.messages_total) : 0;
-  const span = d.first_day && d.last_day ? `${fmtDate(d.first_day)} – ${fmtDate(d.last_day)}` : '';
-  return `<div class="acct-stats">
-      <span><b>${pct}%</b> written by you</span>
-      <span><b>${num(d.messages_total)}</b> messages</span>
-      ${span ? `<span>${esc(span)}</span>` : ''}
-      <a href="#people/${node}">Open account</a>
+// One account of a person: its stats, then its own themes (themes belong to accounts, not to the person).
+// A theme that shares a subject with a theme on another of their accounts says so.
+function accountThemes(a, links, all) {
+  const pct = a.messages_total ? Math.round(100 * a.messages_by_you / a.messages_total) : 0;
+  const span = a.first_day && a.last_day ? `${fmtDate(a.first_day)} – ${fmtDate(a.last_day)}` : '';
+  const byNode = Object.fromEntries(all.map(x => [x.node, x]));
+  const also = i => links.flatMap(l => {
+    const [me, other] = l.a === `${a.node}:${i}` ? [l.a, l.b] : l.b === `${a.node}:${i}` ? [l.b, l.a] : [];
+    if (!me) return [];
+    const [node, k] = other.split(':'), o = byNode[node];
+    return o?.themes[k] ? [{ platform: o.platform, label: platformLabel(o.platform), theme: o.themes[k].theme }] : [];
+  });
+  return `<div class="acct-card" data-acct="${a.node}">
+    <div class="acct-h">
+      <span class="ttl">${dot(a.platform)}<b title="${esc(cleanName(a.name))}">${esc(cleanName(a.name))}</b><span class="muted">${esc(platformLabel(a.platform))}</span></span>
+      <span class="acct-stats"><span><b>${num(a.messages_total)}</b> msgs</span><span><b>${pct}%</b> by you</span>${span ? `<span>${esc(span)}</span>` : ''}<a href="#people/${a.node}">Open</a></span>
     </div>
-    ${d.themes?.length ? `<div class="themes">${d.themes.map(themeHtml).join('')}</div>` : '<p class="placeholder">No recurring themes for this account yet.</p>'}`;
+    ${a.themes?.length ? `<div class="themes">${a.themes.map((t, i) => themeHtml(t, also(i))).join('')}</div>` : '<p class="placeholder">Too few conversations here for recurring themes.</p>'}
+  </div>`;
 }
 
 // Monthly bars, one column per calendar month (gaps included), "you" stacked under "them".

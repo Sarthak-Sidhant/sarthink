@@ -39,8 +39,11 @@ Ids: `A_<account_id>` and `P_<person_id>` are separate id spaces; graph threads 
 
 - **Linking is one row.** Attach, detach, create, rename and delete a person write `PersonAccounts`/`People` only.
   No rebuild of identity, chunks or the graph files, so it is instant.
-- **Summaries:** an account's summary covers the conversations that account wrote in. A person's view combines
-  their accounts: totals across them and themes over the union of their conversations.
+- **Summaries:** an account's summary covers the conversations that account wrote in. A person's view adds up
+  totals, activity and chats across their accounts, but **themes stay with each account**: the person page, the 3D
+  view (person → accounts → themes → conversations) and the assistant all list themes under the account they come
+  from. Two themes on different accounts that share a subject (say "birthday wishes" on WhatsApp and on Twitter)
+  are marked "also on …" and joined by a faint line in 3D.
 - **Graph:** the graph files hold account and thread nodes only (rebuilt on import). People are served by the API
   and drawn as nodes linked to their accounts, so a link shows up without reloading the graph.
 - **Search and the assistant:** "chats with Riya" expands Riya to her accounts. An account name works too.
