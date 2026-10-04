@@ -49,10 +49,11 @@ How to work:
   stopped, activity over time. Never estimate numbers from search results.
 - Memory: recall holds consolidated facts with dates (current vs past) and support. For anything about the current
   state or history of Sarthak or a person (studies, work, where they live, relationships, possessions, health,
-  plans, what changed), call recall first. When recall returns current facts supported by 3+ conversations that
-  answer the question, ANSWER FROM THEM and cite their [n]: do not search again just to re-confirm. Search or read
-  further only when the facts are missing, disputed, rest on 1-2 conversations, or the question asks for details,
-  quotes or a specific episode. Interpret freely when asked (patterns, how things changed), marked as such.
+  plans, what changed), call recall first. Facts with checked=true were verified against the messages: when such
+  current facts answer the question, ANSWER FROM THEM and cite their [n]; do not search again just to re-confirm.
+  Search or read further only when the facts are missing, unchecked, disputed, or the question asks for details,
+  quotes or a specific episode. Facts carry last_mentioned: for a question about NOW, a fact not mentioned for
+  months (or flagged maybe_outdated) is the last known state — say so, or check for anything newer. Interpret freely when asked (patterns, how things changed), marked as such.
 - For questions about a relationship or a person in general, start with person_overview, then read a few of
   the example conversations it gives for the themes you mention. Its numbers are exact; cite them as [sql].
 - Use topic_timeline for "when" questions about a topic; then read the example excerpts it returns.
@@ -761,12 +762,22 @@ class Agent:
         else:
             where, args, label = "1", (), "everything"
         with self.sql.lock:
+            checks = c.execute("SELECT 1 FROM main.sqlite_master WHERE name = 'FactChecks'").fetchone()
+            fresh = "last_seen" in {r[1] for r in c.execute("PRAGMA main.table_info(Facts)")}
             rows = c.execute(f"""
                 SELECT f.fact_id, e.name, e.kind, f.category, f.statement, f.valid_from, f.valid_to, f.status,
-                       f.confidence, f.sources, v.v
+                       f.confidence, f.sources, v.v, {'fc.verdict' if checks else 'NULL'},
+                       {'f.last_seen, f.stale' if fresh else 'NULL, NULL'}
                 FROM main.Facts f JOIN main.Entities e USING(entity_id)
                 LEFT JOIN main.FactVectors v USING(fact_id)
+                {'LEFT JOIN main.FactChecks fc USING(fact_id)' if checks else ''}
                 WHERE {where} {'' if include_past else "AND f.status != 'past'"}""", args).fetchall()
+        with self.sql.lock:     # facts Sarthak marked wrong are never used
+            try:
+                wrong = {r[0] for r in c.execute("SELECT fact_id FROM u.FactFeedback WHERE verdict = 'wrong'")}
+            except sqlite3.Error:
+                wrong = set()
+        rows = [r for r in rows if r[0] not in wrong]
         if not rows:
             return {"about": label, "facts": [], "note": "nothing in memory; try search_memory"}
         if query and any(r[10] for r in rows):
@@ -782,7 +793,7 @@ class Agent:
             order = sorted(range(len(rows)), key=lambda i: (rows[i][7] == "past", -(rows[i][8] or 0)))
         out = []
         for i in order[:k]:
-            fid, ename, kind, cat, st, vf, vt, status, conf, srcs, _ = rows[i]
+            fid, ename, kind, cat, st, vf, vt, status, conf, srcs, _, checked, last_seen, stale = rows[i]
             n = None
             for sid in json.loads(srcs or "[]")[:1]:
                 try:
@@ -791,7 +802,9 @@ class Agent:
                 except Exception:
                     pass
             out.append({"n": n, "about": ename if kind != "self" else "Sarthak", "category": cat, "fact": st,
-                        "since": vf, "until": vt, "status": status, "conversations": conf})
+                        "since": vf, "until": vt, "status": status, "conversations": conf,
+                        "checked": bool(checked), "last_mentioned": last_seen,
+                        **({"maybe_outdated": True} if stale else {})})
         return {"about": label, "facts": out, "more": max(0, len(rows) - k)}
 
     def _overview(self, sources, person):

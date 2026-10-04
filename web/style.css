@@ -589,3 +589,13 @@ button:disabled { opacity: .5; cursor: default; }
 .fact-history { margin-top: 14px; }
 .fact-history summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
 .fact-history .fact { opacity: .8; }
+.fact .meta .unchecked { color: var(--muted); font-style: italic; }
+.fact .fact-acts { margin-left: auto; display: inline-flex; gap: 6px; opacity: 0; transition: opacity .15s; }
+.fact:hover .fact-acts, .fact .fact-acts:focus-within { opacity: 1; }
+.fact .fact-acts button { font-size: 11px; color: var(--muted); padding: 0 4px; border-radius: 4px; }
+.fact .fact-acts button:hover { color: var(--text); background: var(--surface-2); }
+.fact .fact-acts .ok { color: var(--good); font-size: 11px; }
+.fact.gone { opacity: 0; transition: opacity .25s; }
+@media (hover: none) { .fact .fact-acts { opacity: 1; } }
+.fact.stale > div:first-child { color: var(--text-2); }
+.fact .meta .stale { color: var(--warn); }

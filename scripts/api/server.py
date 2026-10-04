@@ -592,6 +592,43 @@ def people_get(pid: int):
     return {**p, "suggestions": sugg}
 
 
+FEEDBACK_SQL = """CREATE TABLE IF NOT EXISTS FactFeedback (fact_id TEXT PRIMARY KEY, verdict TEXT, statement TEXT,
+                   entity_kind TEXT, person_id INTEGER, account_id INTEGER, note TEXT, created TEXT)"""
+
+
+def _feedback():
+    """Your verdicts on facts ({fact_id: 'wrong'|'right'}), from the user DB (they survive rebuilds)."""
+    with sqlite3.connect(USER_DB) as c:
+        c.execute(FEEDBACK_SQL)
+        return dict(c.execute("SELECT fact_id, verdict FROM FactFeedback"))
+
+
+class FactFeedbackRequest(BaseModel):
+    verdict: str          # wrong | right | clear
+    note: str = ""
+
+
+@app.post("/api/facts/{fact_id}/feedback")
+def fact_feedback(fact_id: str, body: FactFeedbackRequest):
+    """You mark a fact wrong (hidden at once, and never recreated by a rebuild) or right (confirmed by you)."""
+    if body.verdict not in ("wrong", "right", "clear"):
+        raise HTTPException(400, "verdict must be wrong, right or clear")
+    with LOCK:
+        r = S.conn.execute("""SELECT f.statement, e.kind, e.person_id, e.account_id FROM Facts f JOIN Entities e
+                              USING(entity_id) WHERE f.fact_id = ?""", (fact_id,)).fetchone()
+    with sqlite3.connect(USER_DB) as c:
+        c.execute(FEEDBACK_SQL)
+        if body.verdict == "clear":
+            c.execute("DELETE FROM FactFeedback WHERE fact_id = ?", (fact_id,))
+        else:
+            if not r:
+                raise HTTPException(404, "no such fact")
+            c.execute("INSERT OR REPLACE INTO FactFeedback VALUES (?,?,?,?,?,?,?,?)",
+                      (fact_id, body.verdict, r[0], r[1], r[2], r[3], body.note,
+                       dt.datetime.now(IST).isoformat(timespec="minutes")))
+    return {"fact_id": fact_id, "verdict": body.verdict}
+
+
 @app.get("/api/facts")
 @locked
 def facts(ref: str = "me", past: bool = True):
@@ -612,14 +649,25 @@ def facts(ref: str = "me", past: bool = True):
         where, args = "(e.account_id = ? OR e.person_id = ?)", (aid, person_of.get(aid, -1))
     else:
         raise HTTPException(400, "ref must be me, P_<id> or A_<id>")
+    checks = S.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'FactChecks'").fetchone()
+    mine = _feedback()
+    cols = {r[1] for r in S.conn.execute("PRAGMA table_info(Facts)")}
+    fresh = "f.last_seen, f.durability, f.stale" if "last_seen" in cols else "NULL, NULL, NULL"
     rows = S.conn.execute(f"""
-        SELECT f.category, f.statement, f.valid_from, f.valid_to, f.status, f.confidence, f.sources
+        SELECT f.category, f.statement, f.valid_from, f.valid_to, f.status, f.confidence, f.sources,
+               {'fc.verdict' if checks else 'NULL'}, f.fact_id, {fresh}
         FROM Facts f JOIN Entities e USING(entity_id)
+        {'LEFT JOIN FactChecks fc USING(fact_id)' if checks else ''}
         WHERE {where} {'' if past else "AND f.status != 'past'"}
-        ORDER BY f.status = 'past', f.confidence DESC""", args).fetchall()
-    return {"built": True, "facts": [{"category": c, "fact": st, "since": vf, "until": vt, "status": stt,
-                                      "conversations": n, "source": (json.loads(src or "[]") or [None])[0]}
-                                     for c, st, vf, vt, stt, n, src in rows]}
+        ORDER BY f.status = 'past', {'COALESCE(f.stale, 0),' if 'stale' in cols else ''}
+                 {'fc.verdict IS NULL,' if checks else ''} f.confidence DESC
+                 {', f.last_seen DESC' if 'last_seen' in cols else ''}""", args).fetchall()
+    return {"built": True, "facts": [{"id": fid, "category": c, "fact": st, "since": vf, "until": vt, "status": stt,
+                                      "conversations": n, "source": (json.loads(src or "[]") or [None])[0],
+                                      "checked": bool(v) or mine.get(fid) == "right",   # by the messages or by you
+                                      "yours": mine.get(fid), "last_seen": ls, "durability": dur, "stale": bool(stale)}
+                                     for c, st, vf, vt, stt, n, src, v, fid, ls, dur, stale in rows
+                                     if mine.get(fid) != "wrong"]}
 
 
 @app.get("/api/people/{pid}/dossier")

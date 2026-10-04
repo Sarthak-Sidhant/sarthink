@@ -1,7 +1,7 @@
 // People and accounts (docs/accounts-and-people.md). An account is one profile on one platform, with its own
 // summary and graph node. A person groups accounts ("Riya" = her WhatsApp + Instagram); you are person 1.
 // Attaching or detaching an account is one row on the server: the page and the graph update in place.
-import { $, api, esc, dot, fmtDate, fmtMonth, num, initials, cleanName, platformColor, platformLabel, PLATFORMS } from './util.js';
+import { $, api, esc, dot, fmtDate, fmtMonth, num, initials, cleanName, platformColor, platformLabel, PLATFORMS, toast } from './util.js';
 import { openDrawer } from './reader.js';
 
 const SHOW = 150;
@@ -191,6 +191,15 @@ export class People {
       ${past.length ? `<details class="fact-history"><summary>History · ${num(past.length)} things that used to be true</summary>
         ${past.sort((a, b) => String(b.until || '').localeCompare(String(a.until || ''))).map(f => factRow(f)).join('')}</details>` : ''}`;
     el.hidden = false;
+    el.addEventListener('click', async e => {          // your verdict on a fact
+      const b = e.target.closest('[data-fact-v]'), row = b?.closest('[data-fact]');
+      if (!b || !row?.dataset.fact) return;
+      try {
+        await api(`/api/facts/${encodeURIComponent(row.dataset.fact)}/feedback`, { body: { verdict: b.dataset.factV } });
+        if (b.dataset.factV === 'wrong') { row.classList.add('gone'); setTimeout(() => row.remove(), 250); toast('Hidden — it won\'t come back'); }
+        else b.outerHTML = '<span class="ok">✓ you confirmed</span>';
+      } catch (err) { toast(`Couldn't save (${err.message})`); }
+    });
     el.querySelectorAll('[data-more-facts]').forEach(b => b.addEventListener('click', () => {
       b.parentElement.querySelectorAll('.fact.extra').forEach(x => x.classList.remove('extra')); b.remove();
     }));
@@ -378,13 +387,22 @@ const FACT_CATS = {
 // "As of 2026-08-03, Sarthak is …" → "Sarthak is …": the dates are shown alongside
 const factText = s => s.replace(/^(As of|On|By|Since) \d{4}-\d{2}(-\d{2})?( to \d{4}-\d{2}(-\d{2})?)?,\s*/i, '');
 const span = f => f.since && f.until ? `${fmtDate(f.since)} – ${fmtDate(f.until)}` : f.since ? `since ${fmtDate(f.since)}` : f.until ? `until ${fmtDate(f.until)}` : '';
+// how fresh a fact is: when the messages last backed it, and whether it may have changed since
+const freshness = f => {
+  if (f.status === 'past') return f.until && f.last_seen && f.until <= f.last_seen && f.durability === 'transient' ? `<span>not mentioned since ${esc(fmtDate(f.last_seen))}</span>` : '';
+  if (!f.last_seen) return '';
+  return f.stale ? `<span class="stale" title="Not mentioned for over six months: it may have changed">last mentioned ${esc(fmtDate(f.last_seen))} · may be out of date</span>`
+    : `<span>last mentioned ${esc(fmtDate(f.last_seen))}</span>`;
+};
 function factRow(f, extra = false) {
-  return `<div class="fact${extra ? ' extra' : ''}${f.status === 'disputed' ? ' disputed' : ''}">
+  return `<div class="fact${extra ? ' extra' : ''}${f.status === 'disputed' ? ' disputed' : ''}${f.stale ? ' stale' : ''}" data-fact="${esc(f.id || '')}">
     <div>${esc(factText(f.fact))}</div>
-    <div class="meta">${span(f) ? `<span>${esc(span(f))}</span>` : ''}
+    <div class="meta">${span(f) ? `<span>${esc(span(f))}</span>` : ''}${freshness(f)}
       <span title="Separate conversations that say this">${f.conversations} conversation${f.conversations === 1 ? '' : 's'}</span>
       ${f.status === 'disputed' ? '<span class="tag">sources disagree</span>' : ''}
-      ${f.source ? `<button class="link" data-session="${esc(f.source)}">source</button>` : ''}</div>
+      ${f.checked ? '' : '<span class="unchecked" title="Not yet checked against the messages">unchecked</span>'}
+      ${f.source ? `<button class="link" data-session="${esc(f.source)}">source</button>` : ''}
+      <span class="fact-acts">${f.yours === 'right' ? '<span class="ok">✓ you confirmed</span>' : '<button data-fact-v="right" title="This is right">✓</button>'}<button data-fact-v="wrong" title="This is wrong: hide it and never bring it back">✕ wrong</button></span></div>
   </div>`;
 }
 

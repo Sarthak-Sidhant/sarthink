@@ -174,6 +174,26 @@ def pass1(conn, cl, limit=0, sample=False, since=None):
 
 # ─── link ─────────────────────────────────────────────────────────────────────
 
+def match_participant(subject, participants):
+    """The participant (account id) a subject name means, or None. An exact name wins, then the same set of name
+    words, then a subject whose words are all in one name, then a first name — each only if exactly one participant
+    matches at that level. ("Devanshi" in a chat with "Devanshi 🌻♥️" and "Sneha Devanshi" is Devanshi, not Sneha.)"""
+    if not subject:
+        return None
+    sw = subject.split()
+    levels = [lambda n: n == subject,
+              lambda n: set(n.split()) == set(sw),
+              lambda n: set(sw) <= set(n.split()),
+              lambda n: n.split()[:1] == sw[:1]]
+    for test in levels:
+        hits = [a for a, n in participants if n and test(n)]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            return None          # ambiguous at the strongest level that matches: don't guess
+    return None
+
+
 def link(conn):
     """Raw fact subjects → entities. You are one entity; people/accounts come from the conversation's participants
     (matched by name), so 'Mihir Karbelkar GOAT' in one chat and 'Mihir' in another land on the same person when
@@ -214,13 +234,8 @@ def link(conn):
         if kind == "self" or s in ("sarthak", "sarthak sidhant", "sarthak sidhant me", "me"):
             eid = me
         elif kind == "person":
-            best = None
-            for a in sess_accts.get(sid, []):
-                if acc.get(a) and not acc[a][5]:
-                    an = norm(acc[a][1])
-                    if s and (s == an or s in an or an in s or s.split()[0] == an.split()[0] if an else False):
-                        best = a
-                        break
+            best = match_participant(s, [(a, norm(acc[a][1])) for a in sess_accts.get(sid, [])
+                                         if acc.get(a) and not acc[a][5]])
             if best is not None:
                 pid = person_of.get(best)
                 eid = entity("person", pnames.get(pid) if pid else acc[best][1], account_id=None if pid else best,
@@ -588,9 +603,417 @@ def reconcile(conn, cl, only=None):
           f"tokens in {tin:,} out {tout:,}")
 
 
+# ─── verify: every fact checked against the messages ──────────────────────────
+# Facts are two model steps from the messages (chat → summary → fact) and an audit found ~60% right in every detail
+# (scripts/index/audit_facts.py). So each fact is checked against the archive excerpts that best match it, searched
+# in that person's chats (yours for facts about you): correct facts stay (with those excerpts as sources), partly
+# right ones are replaced by the corrected wording, wrong or unsupported ones are set aside (FactsDropped).
+# Facts are checked in batches per person, sharing the call, with each person's other names so an alias
+# (PACKEEPER = Harshvardhan Maurya) isn't mistaken for someone else.
+VERIFY_BATCH, EVIDENCE_K = 6, 3
+
+PV = """You check facts in a personal memory system against the actual messages. The person: {name}
+(also appears as: {aliases}). "Sarthak Sidhant (me)" is the owner. For each fact below, judge it strictly against
+ITS excerpts (the archive's best matches for it):
+- "correct": clearly supported as stated
+- "partly": core right, a detail wrong or overstated → give the corrected fact, only what the messages support
+- "wrong": contradicted, about someone else (not an alias above), or a joke/sarcasm/meme taken literally
+- "unverifiable": the excerpts don't say it
+"corrected" is the fact itself, nothing else: never mention the excerpts, messages, sources or what they don't say
+(write "Sarthak paid ₹13.7k for the room.", not "…, but the excerpts don't show…").
+Return JSON: {{"facts": [{{"i": <n>, "verdict": "...", "corrected": "<for partly: one sentence naming the person>",
+"evidence": [<numbers of the excerpts that support it>]}}]}}
+
+{facts}"""
+
+
+def _search(api, q, person_ref, me_only, k):
+    import urllib.parse
+    import urllib.request
+    args = {"q": q, "k": k}
+    if person_ref:
+        args["person"] = person_ref
+    if me_only:
+        args["me_only"] = "true"
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(f"{api}/api/search?{urllib.parse.urlencode(args)}", timeout=90) as r:
+                return json.load(r)["results"]
+        except Exception:
+            continue
+    return []
+
+
+def verify(conn, cl, api, only=None, limit=0, fact_ids=None, scope="all"):
+    """scope: 'core' = you, your grouped people and places/orgs/projects/things (the facts the app shows most);
+    'all' adds contacts not grouped into a person and people only mentioned."""
+    import sqlite3
+    from common import USER_DB
+    conn.executescript(SCHEMA + """
+        CREATE TABLE IF NOT EXISTS FactChecks (fact_id TEXT PRIMARY KEY, verdict TEXT, corrected TEXT, evidence TEXT,
+                                               model TEXT, checked_on TEXT);
+        CREATE TABLE IF NOT EXISTS FactsDropped AS SELECT *, '' AS verdict, '' AS dropped_on FROM Facts WHERE 0;""")
+    today = dt.datetime.now(IST).strftime("%Y-%m-%d")
+    with sqlite3.connect(USER_DB) as u:
+        pa = list(u.execute("SELECT person_id, platform, raw_id, chat FROM PersonAccounts"))
+    acc = {(r[1], r[2], r[3]): r[0] for r in conn.execute("SELECT name, platform, raw_id, chat FROM Accounts")}
+    names_of = {}
+    for pid, plat, rid, chat in pa:
+        n = acc.get((plat, rid, chat))
+        if n:
+            names_of.setdefault(pid, set()).add(n)
+    q = """SELECT f.fact_id, f.statement, e.entity_id, e.kind, e.name, e.person_id, e.account_id, e.aliases
+           FROM Facts f JOIN Entities e USING(entity_id)
+           WHERE f.fact_id NOT IN (SELECT fact_id FROM FactChecks)"""
+    rows = conn.execute(q).fetchall()
+    if fact_ids is not None:
+        rows = [r for r in rows if r[0] in fact_ids]
+    if only:
+        rows = [r for r in rows if norm(only) in norm(r[4])]
+    if scope == "core":
+        rows = [r for r in rows if r[3] == "self" or r[5] or r[3] in ("place", "org", "project", "thing")]
+    if limit:
+        rows = rows[:limit]
+    by_ent = {}
+    for r in rows:
+        by_ent.setdefault(r[2], []).append(r)
+    jobs = [(ent, rs[i:i + VERIFY_BATCH]) for ent, rs in by_ent.items() for i in range(0, len(rs), VERIFY_BATCH)]
+    print(f"verify: {len(rows):,} facts in {len(jobs):,} calls", flush=True)
+
+    def run(job):
+        _, rs = job
+        _, _, _, kind, name, pid, aid, aliases = rs[0]
+        ref = None if kind == "self" else f"P_{pid}" if pid else f"A_{aid}" if aid else None
+        also = sorted((names_of.get(pid) or set()) | set(json.loads(aliases or "[]")) - {name})[:8]
+        if kind == "self":
+            name, also = "Sarthak Sidhant (me)", ["Sarthak", "s1dhant", "Sarthak Sidhant"]
+        blocks, ev = [], []
+        for i, (fid, st, *_rest) in enumerate(rs):
+            hits = _search(api, st, ref, kind == "self", EVIDENCE_K)
+            ev.append([(h["session_id"], h["chunk_id"]) for h in hits])
+            ex = "\n".join(f"  ({j}) {h['header']}\n{h['text']}" for j, h in enumerate(hits)) or "  (no excerpts)"
+            blocks.append(f"### Fact {i}: {st}\nExcerpts:\n{ex}")
+        out, usage = ask(cl, PV.format(name=name, aliases=", ".join(also) or "-", facts="\n\n".join(blocks)),
+                         thinking=True, max_tokens=24000)
+        return rs, ev, out, usage
+
+    tin = tout = 0
+    counts, done = {}, 0
+    errors = 0
+    with cf.ThreadPoolExecutor(12) as ex:        # 24 in flight got throttled: most calls failed
+        for rs, ev, out, usage in ex.map(run, jobs):
+            if usage:
+                tin, tout = tin + usage.prompt_tokens, tout + usage.completion_tokens
+            if "error" in out:
+                errors += 1
+                if errors <= 3:
+                    print(f"  call failed: {out['error'][:160]}", flush=True)
+                continue
+            for o in out.get("facts", []):
+                i, v = o.get("i"), o.get("verdict")
+                if not isinstance(i, int) or not 0 <= i < len(rs) or v not in ("correct", "partly", "wrong", "unverifiable"):
+                    continue
+                fid, st = rs[i][0], rs[i][1]
+                used = [ev[i][j] for j in o.get("evidence") or [] if isinstance(j, int) and 0 <= j < len(ev[i])]
+                sess = list(dict.fromkeys(s_ for s_, _ in used))
+                conn.execute("INSERT OR REPLACE INTO FactChecks VALUES (?,?,?,?,?,?)",
+                             (fid, v, o.get("corrected") or "", json.dumps(used), MODEL, today))
+                counts[v] = counts.get(v, 0) + 1
+                if v in ("wrong", "unverifiable"):
+                    conn.execute("INSERT INTO FactsDropped SELECT *, ?, ? FROM Facts WHERE fact_id = ?", (v, today, fid))
+                    conn.execute("DELETE FROM Facts WHERE fact_id = ?", (fid,))
+                else:
+                    new = (o.get("corrected") or "").strip() if v == "partly" else st
+                    conn.execute("UPDATE Facts SET statement = ?, sources = ? WHERE fact_id = ?",
+                                 (new or st, json.dumps(sess[:5]) if sess else
+                                  conn.execute("SELECT sources FROM Facts WHERE fact_id = ?", (fid,)).fetchone()[0], fid))
+                    if v == "partly":
+                        conn.execute("DELETE FROM FactVectors WHERE fact_id = ?", (fid,))   # re-embedded on next use
+            done += len(rs)
+            conn.commit()
+            if done % 300 < VERIFY_BATCH:
+                print(f"  {done:,}/{len(rows):,} | " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+                      + f" | tokens in {tin:,} out {tout:,}", flush=True)
+    print(f"verify done ({errors} calls failed, rerun to retry them): " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+          + f" | tokens in {tin:,} out {tout:,} ≈ ${(tin * 0.15 + tout * 0.6) / 1e6:.2f} off-peak")
+    return counts, tin, tout
+
+
+# ─── fresh: is it still true? ─────────────────────────────────────────────────
+# Verification proves a fact was said; this keeps it current. Every fact gets a last-mentioned date (the newest
+# message backing it) and a durability: lasting (true for good: schooling history, family, chronic conditions),
+# state (true until something changes it: where someone lives/studies/works, a relationship, a laptop) or transient
+# (plans, illness episodes, "currently doing X"). For each current fact the person's chats AFTER its last mention
+# are searched; with nothing newer no model call is made. With newer messages the model decides: still true (the
+# date moves forward), changed (the fact closes with an end date and the new state becomes a current fact, sourced
+# from the messages that show the change), or unclear. Transient facts not mentioned for TRANSIENT_DAYS move to
+# history; a state not mentioned for STALE_DAYS is flagged as maybe out of date (shown, not trusted blindly).
+TRANSIENT_DAYS, STALE_DAYS, FRESH_BATCH, NEWER_K = 45, 180, 6, 4
+
+PF = """Today is {today}. These facts about {name} (also appears as: {aliases}) were last mentioned on the date shown.
+Below each are the newest messages from AFTER that date that may bear on it. For each fact:
+- durability: "lasting" (true for good once true: where he went to school, family, birthplace, chronic conditions,
+  past events), "state" (true until something changes it: where someone lives/studies/works, a relationship,
+  what they own, a role), or "transient" (plans, an illness episode, being busy/sad, currently doing something)
+- verdict: "still_true" (the newer messages confirm it), "changed" (they show it is no longer true), "unclear"
+  (they touch the topic without settling it), or "no_new_info" (they are not about it)
+- for "changed": "now" = the current state as one sentence naming {name} (empty if it simply stopped being true);
+  state the fact only, never comment on the messages
+  "changed_on" = YYYY-MM-DD of the message that shows the change
+- evidence: numbers of the excerpts that show it (for still_true / changed)
+Return JSON: {{"facts": [{{"i": <n>, "durability": "...", "verdict": "...", "now": "", "changed_on": "",
+"evidence": []}}]}}
+
+{facts}"""
+
+PD = """Label how long each fact about {name} stays true:
+"lasting" (true for good once true: schooling history, family, birthplace, chronic conditions, past events),
+"state" (true until something changes it: where someone lives/studies/works, a relationship, possessions, a role),
+"transient" (plans, an illness episode, moods, being busy, currently doing something).
+Return JSON: {{"facts": [{{"i": <n>, "durability": "lasting|state|transient"}}]}}
+
+{facts}"""
+
+
+def _fresh_columns(conn):
+    have = {r[1] for r in conn.execute("PRAGMA table_info(Facts)")}
+    for col in ("last_seen", "durability", "fresh_on", "stale"):
+        if col not in have:
+            conn.execute(f"ALTER TABLE Facts ADD COLUMN {col} {'INTEGER' if col == 'stale' else 'TEXT'}")
+    conn.commit()
+
+
+def _last_seen(conn):
+    """last_seen = date of the newest message backing a fact: its checked evidence, else its source sessions."""
+    ev = dict(conn.execute("SELECT fact_id, evidence FROM FactChecks")) if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'FactChecks'").fetchone() else {}
+    chunk_end = {}
+    for fid, srcs, vf in conn.execute("SELECT fact_id, sources, valid_from FROM Facts WHERE last_seen IS NULL").fetchall():
+        days = []
+        for sid, cid in json.loads(ev.get(fid) or "[]"):
+            if cid not in chunk_end:
+                r = conn.execute("SELECT end_ts FROM Chunks WHERE chunk_id = ?", (cid,)).fetchone()
+                chunk_end[cid] = r[0] if r else None
+            if chunk_end[cid]:
+                days.append(dt.datetime.fromtimestamp(chunk_end[cid], IST).strftime("%Y-%m-%d"))
+        if not days:
+            for sid in json.loads(srcs or "[]"):
+                r = conn.execute("SELECT end_ts FROM Sessions WHERE session_id = ?", (sid,)).fetchone()
+                if r and r[0]:
+                    days.append(dt.datetime.fromtimestamp(r[0], IST).strftime("%Y-%m-%d"))
+        last = max(days) if days else (str(vf)[:10] if vf else None)
+        conn.execute("UPDATE Facts SET last_seen = ? WHERE fact_id = ?", (last, fid))
+    conn.commit()
+
+
+def fresh(conn, cl, api, only=None, scope="core", limit=0):
+    import sqlite3
+    from common import USER_DB
+    _fresh_columns(conn)
+    _last_seen(conn)
+    today = dt.datetime.now(IST).date()
+    with sqlite3.connect(USER_DB) as u:
+        pa = list(u.execute("SELECT person_id, platform, raw_id, chat FROM PersonAccounts"))
+    acc = {(r[1], r[2], r[3]): r[0] for r in conn.execute("SELECT name, platform, raw_id, chat FROM Accounts")}
+    names_of = {}
+    for pid, plat, rid, chat in pa:
+        if acc.get((plat, rid, chat)):
+            names_of.setdefault(pid, set()).add(acc[(plat, rid, chat)])
+    rows = conn.execute("""
+        SELECT f.fact_id, f.statement, f.last_seen, f.category, e.entity_id, e.kind, e.name, e.person_id, e.account_id,
+               e.aliases
+        FROM Facts f JOIN Entities e USING(entity_id)
+        WHERE f.status != 'past' AND (f.fresh_on IS NULL OR f.fresh_on < ?)""", (today.isoformat(),)).fetchall()
+    if only:
+        rows = [r for r in rows if norm(only) in norm(r[6])]
+    if scope == "core":
+        rows = [r for r in rows if r[5] == "self" or r[7] or r[5] in ("place", "org", "project", "thing")]
+    if limit:
+        rows = rows[:limit]
+    print(f"fresh: {len(rows):,} current facts to check", flush=True)
+
+    def who(r):
+        kind, name, pid, aid, aliases = r[5], r[6], r[7], r[8], r[9]
+        if kind == "self":
+            return "Sarthak Sidhant (me)", ["Sarthak", "s1dhant"], None, True
+        also = sorted((names_of.get(pid) or set()) | set(json.loads(aliases or "[]")) - {name})[:8]
+        return name, also, (f"P_{pid}" if pid else f"A_{aid}" if aid else None), False
+
+    # newer messages for each fact (no model call where there are none)
+    def newer(r):
+        name, also, ref, me = who(r)
+        since = (dt.date.fromisoformat(r[2]) + dt.timedelta(days=1)).isoformat() if r[2] else None
+        if not since:
+            return r, []
+        hits = _search_since(api, r[1], ref, me, NEWER_K, since)
+        return r, [h for h in hits if h.get("start", "")[:10] >= since]
+    with cf.ThreadPoolExecutor(12) as ex:
+        found = list(ex.map(newer, rows))
+    with_new = [(r, h) for r, h in found if h]
+    without = [r for r, h in found if not h]
+    print(f"   {len(with_new):,} have newer messages to read; {len(without):,} have none (durability only)", flush=True)
+
+    tin = tout = 0
+    counts = {}
+    stamp = today.isoformat()
+
+    def label_only(batch):       # facts with nothing newer: just how long they stay true (cheap, no thinking)
+        name, *_ = who(batch[0])
+        text = "\n".join(f"{i}. {r[1]}" for i, r in enumerate(batch))
+        out, usage = ask(cl, PD.format(name=name, facts=text), thinking=False, max_tokens=3000)
+        return batch, out, usage
+    by_ent = {}
+    for r in without:
+        by_ent.setdefault(r[4], []).append(r)
+    jobs = [rs[i:i + 30] for rs in by_ent.values() for i in range(0, len(rs), 30)]
+    with cf.ThreadPoolExecutor(16) as ex:
+        for batch, out, usage in ex.map(label_only, jobs):
+            if usage:
+                tin, tout = tin + usage.prompt_tokens, tout + usage.completion_tokens
+            for o in out.get("facts", []) if "error" not in out else []:
+                i = o.get("i")
+                if isinstance(i, int) and 0 <= i < len(batch) and o.get("durability") in ("lasting", "state", "transient"):
+                    conn.execute("UPDATE Facts SET durability = ?, fresh_on = ? WHERE fact_id = ?",
+                                 (o["durability"], stamp, batch[i][0]))
+            conn.commit()
+
+    def read_newer(batch):       # facts with newer messages: still true, changed, or unclear (thinking)
+        name, also, _, _ = who(batch[0][0])
+        blocks = []
+        for i, (r, hits) in enumerate(batch):
+            ex_ = "\n".join(f"  ({j}) {h['header']}\n{h['text']}" for j, h in enumerate(hits))
+            blocks.append(f"### Fact {i} (last mentioned {r[2]}): {r[1]}\nNewer messages:\n{ex_}")
+        out, usage = ask(cl, PF.format(today=stamp, name=name, aliases=", ".join(also) or "-", facts="\n\n".join(blocks)),
+                         thinking=True, max_tokens=24000)
+        return batch, out, usage
+    by_ent = {}
+    for r, h in with_new:
+        by_ent.setdefault(r[4], []).append((r, h))
+    jobs = [rs[i:i + FRESH_BATCH] for rs in by_ent.values() for i in range(0, len(rs), FRESH_BATCH)]
+    with cf.ThreadPoolExecutor(24) as ex:
+        for batch, out, usage in ex.map(read_newer, jobs):
+            if usage:
+                tin, tout = tin + usage.prompt_tokens, tout + usage.completion_tokens
+            for o in out.get("facts", []) if "error" not in out else []:
+                i, v = o.get("i"), o.get("verdict")
+                if not isinstance(i, int) or not 0 <= i < len(batch):
+                    continue
+                r, hits = batch[i]
+                fid, eid, cat = r[0], r[4], r[3]
+                dur = o.get("durability") if o.get("durability") in ("lasting", "state", "transient") else None
+                used = [hits[j] for j in o.get("evidence") or [] if isinstance(j, int) and 0 <= j < len(hits)]
+                newest = max([h.get("start", "")[:10] for h in used] or [r[2] or ""]) or None
+                counts[v] = counts.get(v, 0) + 1
+                if v == "still_true":
+                    conn.execute("UPDATE Facts SET last_seen = ?, durability = COALESCE(?, durability), fresh_on = ? "
+                                 "WHERE fact_id = ?", (newest, dur, stamp, fid))
+                elif v == "changed":
+                    when = str(o.get("changed_on") or newest or stamp)[:10]
+                    conn.execute("UPDATE Facts SET status = 'past', valid_to = ?, durability = COALESCE(?, durability), "
+                                 "fresh_on = ? WHERE fact_id = ?", (when, dur, stamp, fid))
+                    now = (o.get("now") or "").strip()
+                    if now:
+                        _add_current(conn, eid, cat, now, when, used, dur, stamp)
+                else:
+                    conn.execute("UPDATE Facts SET durability = COALESCE(?, durability), fresh_on = ? WHERE fact_id = ?",
+                                 (dur, stamp, fid))
+            conn.commit()
+
+    # expiry: transient facts not mentioned for a while are history; old states are flagged
+    cut_t = (today - dt.timedelta(days=TRANSIENT_DAYS)).isoformat()
+    cut_s = (today - dt.timedelta(days=STALE_DAYS)).isoformat()
+    n_exp = conn.execute("""UPDATE Facts SET status = 'past', valid_to = COALESCE(valid_to, last_seen)
+                            WHERE status != 'past' AND durability = 'transient' AND last_seen < ?""", (cut_t,)).rowcount
+    conn.execute("UPDATE Facts SET stale = (status != 'past' AND durability = 'state' AND last_seen < ?)", (cut_s,))
+    n_stale = conn.execute("SELECT COUNT(*) FROM Facts WHERE stale = 1").fetchone()[0]
+    conn.commit()
+    print("fresh done: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+          + f"; {n_exp} transient facts moved to history; {n_stale} states flagged as maybe out of date"
+          + f" | tokens in {tin:,} out {tout:,} ≈ ${(tin * 0.15 + tout * 0.6) / 1e6:.2f} off-peak")
+
+
+def _search_since(api, q, person_ref, me_only, k, since):
+    import urllib.parse
+    import urllib.request
+    args = {"q": q, "k": k, "since": since}
+    if person_ref:
+        args["person"] = person_ref
+    if me_only:
+        args["me_only"] = "true"
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(f"{api}/api/search?{urllib.parse.urlencode(args)}", timeout=90) as r:
+                return json.load(r)["results"]
+        except Exception:
+            continue
+    return []
+
+
+def _add_current(conn, eid, cat, statement, since, hits, durability, stamp):
+    """The new state after a change; if a current fact of the same entity already says it, just refresh that one."""
+    rows = conn.execute("SELECT fact_id, statement FROM Facts WHERE entity_id = ? AND status != 'past'", (eid,)).fetchall()
+    vec = _embed_texts([("new", statement)])
+    fv = fact_vectors(conn, rows) if rows else {}
+    last = max([h.get("start", "")[:10] for h in hits] or [since])
+    for fid, _ in rows:
+        if "new" in vec and fid in fv and float(fv[fid] @ vec["new"]) >= 0.9:
+            conn.execute("UPDATE Facts SET last_seen = MAX(COALESCE(last_seen, ''), ?), fresh_on = ? WHERE fact_id = ?",
+                         (last, stamp, fid))
+            return
+    fid = hashlib.sha1(f"{eid}|{statement}".encode()).hexdigest()[:16]
+    sess = list(dict.fromkeys(h["session_id"] for h in hits))[:5]
+    conn.execute("""INSERT OR REPLACE INTO Facts (fact_id, entity_id, category, statement, valid_from, valid_to, status,
+                    confidence, sources, model, version, updated, last_seen, durability, fresh_on)
+                    VALUES (?,?,?,?,?,NULL,'current',?,?,?,?,?,?,?,?)""",
+                 (fid, eid, cat, statement, since, max(1, len(sess)), json.dumps(sess), MODEL, P2_VERSION, stamp,
+                  last, durability, stamp))
+    conn.execute("INSERT OR REPLACE INTO FactChecks VALUES (?,?,?,?,?,?)",      # written from the messages that show it
+                 (fid, "correct", "", json.dumps([[h["session_id"], h["chunk_id"]] for h in hits]), MODEL, stamp))
+
+
+# ─── your corrections ─────────────────────────────────────────────────────────
+
+def apply_feedback(conn):
+    """Facts you marked wrong (People page, FactFeedback in the user DB) stay gone after rebuilds: any fact of the same
+    person that says nearly the same thing (cosine >= 0.9) is set aside too."""
+    import sqlite3
+    from common import USER_DB
+    with sqlite3.connect(USER_DB) as u:
+        try:
+            wrong = u.execute("""SELECT fact_id, statement, entity_kind, person_id, account_id FROM FactFeedback
+                                 WHERE verdict = 'wrong'""").fetchall()
+        except sqlite3.Error:
+            return 0
+    if not wrong:
+        return 0
+    conn.executescript("""CREATE TABLE IF NOT EXISTS FactsDropped AS SELECT *, '' AS verdict, '' AS dropped_on
+                          FROM Facts WHERE 0;""")
+    today = dt.datetime.now(IST).strftime("%Y-%m-%d")
+    wv = _embed_texts([(w[0], w[1]) for w in wrong])
+    n = 0
+    for fid, st, kind, pid, aid in wrong:
+        where = "e.kind = 'self'" if kind == "self" else "e.person_id = ?" if pid else "e.account_id = ?"
+        args = () if kind == "self" else (pid,) if pid else (aid,)
+        rows = conn.execute(f"SELECT f.fact_id, f.statement FROM Facts f JOIN Entities e USING(entity_id) WHERE {where}",
+                            args).fetchall()
+        if not rows or fid not in wv:
+            continue
+        fv = fact_vectors(conn, rows)
+        gone = [r[0] for r in rows if r[0] == fid or (r[0] in fv and float(fv[r[0]] @ wv[fid]) >= 0.9)]
+        for g in gone:
+            conn.execute("INSERT INTO FactsDropped SELECT *, 'you said wrong', ? FROM Facts WHERE fact_id = ?", (today, g))
+            conn.execute("DELETE FROM Facts WHERE fact_id = ?", (g,))
+        n += len(gone)
+    conn.commit()
+    print(f"your corrections: {n} facts kept out")
+    return n
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("step", choices=["pass1", "link", "pass2", "reconcile", "all"])
+    ap.add_argument("step", choices=["pass1", "link", "pass2", "reconcile", "verify", "fresh", "all"])
+    ap.add_argument("--api", default="http://127.0.0.1:8000", help="verify: a running Sarthink API to search with")
+    ap.add_argument("--scope", choices=["core", "all"], default="all", help="verify: which facts")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--sample", action="store_true")
     ap.add_argument("--entity", help="pass 2: only entities whose name contains this")
@@ -605,3 +1028,9 @@ if __name__ == "__main__":
         pass2(conn, cl, a.entity, a.limit)
     if a.step in ("reconcile", "all"):
         reconcile(conn, cl, a.entity)
+    if a.step in ("verify", "all"):
+        verify(conn, cl, a.api, a.entity, a.limit, scope=a.scope)
+    if a.step in ("fresh", "all"):
+        fresh(conn, cl, a.api, a.entity, a.scope, a.limit)
+    if a.step in ("reconcile", "verify", "fresh", "all"):
+        apply_feedback(conn)
