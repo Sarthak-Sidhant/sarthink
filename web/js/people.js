@@ -152,6 +152,7 @@ export class People {
         <div class="tile"><div class="v">${num(d.months?.length || 0)}</div><div class="l">active months</div></div>
         <div class="tile"><div class="v">${d.last_day ? esc(fmtDate(d.last_day)) : '—'}</div><div class="l">last talked</div></div>
       </div>
+      <div class="section" id="p-facts" hidden></div>
       ${d.months?.length ? `<div class="section">
         <h2>Activity <span class="legend"><span><i style="background:var(--series-1)"></i>You</span><span><i style="background:var(--ramp-light)"></i>${isMe ? 'Others' : esc(name)}</span></span></h2>
         <div class="chart" id="act-chart">${activityChart(d.months)}</div>
@@ -166,6 +167,33 @@ export class People {
           <span class="n">${num(c.messages)} msgs</span>
         </div>`).join('')}</div></div>` : ''}`;
     bindChartTips($('act-chart'));
+    this.loadFacts(isMe ? 'me' : ref, ref, isMe);
+  }
+
+  // the memory layer: what Sarthink knows about this person (or you), by category, with dates and sources
+  async loadFacts(ref, page, isMe) {
+    let d;
+    try { d = await api(`/api/facts?ref=${encodeURIComponent(ref)}`); } catch { return; }
+    const el = $('p-facts');
+    if (!el || this.current !== page || !d.facts?.length) return;      // moved to another page meanwhile
+    const now = d.facts.filter(f => f.status !== 'past'), past = d.facts.filter(f => f.status === 'past');
+    const by = {};
+    for (const f of now) (by[f.category] = by[f.category] || []).push(f);
+    const order = Object.keys(FACT_CATS).filter(k => by[k]).concat(Object.keys(by).filter(k => !FACT_CATS[k]));
+    const PER = 4;
+    el.innerHTML = `<h2>What I know <span class="muted">${isMe ? 'about you' : ''} · ${num(now.length)} facts from your conversations</span></h2>
+      <div class="facts">${order.map(k => `
+        <div class="fact-cat">
+          <h3>${esc(FACT_CATS[k] || k)} <span class="muted">${by[k].length}</span></h3>
+          ${by[k].map((f, i) => factRow(f, i >= PER)).join('')}
+          ${by[k].length > PER ? `<button class="ghost-btn sm" data-more-facts>Show ${by[k].length - PER} more</button>` : ''}
+        </div>`).join('')}</div>
+      ${past.length ? `<details class="fact-history"><summary>History · ${num(past.length)} things that used to be true</summary>
+        ${past.sort((a, b) => String(b.until || '').localeCompare(String(a.until || ''))).map(f => factRow(f)).join('')}</details>` : ''}`;
+    el.hidden = false;
+    el.querySelectorAll('[data-more-facts]').forEach(b => b.addEventListener('click', () => {
+      b.parentElement.querySelectorAll('.fact.extra').forEach(x => x.classList.remove('extra')); b.remove();
+    }));
   }
 
   // ─── same-name suggestions in one place ───────────────────────────────
@@ -340,6 +368,24 @@ function accountPanel(a) {
        <div class="acct-rename inline-form" id="p-create" hidden><input value="${esc(cleanName(a.name))}" placeholder="Their name"><button class="primary-btn sm" data-save data-create>Create</button></div>
        <div id="p-join" hidden><div class="acct-find"><input id="pp-q" type="search" placeholder="Which person? Type a name"></div><div id="pp-found"></div></div>`;
   return `<div class="section p-panel">${owner}${suggestionsHtml(a.suggestions, 'Same person on another platform?')}<div class="acct-status muted"></div></div>`;
+}
+
+const FACT_CATS = {
+  relationship: 'Relationships', family: 'Family', education: 'Studies', work: 'Work & projects', location: 'Where',
+  health: 'Health', money: 'Money', possession: 'Has', goal: 'Goals', plan: 'Plans', skill: 'Skills',
+  preference: 'Likes & dislikes', belief: 'Views', identity: 'Who', social: 'Social', event: 'Events',
+};
+// "As of 2026-08-03, Sarthak is …" → "Sarthak is …": the dates are shown alongside
+const factText = s => s.replace(/^(As of|On|By|Since) \d{4}-\d{2}(-\d{2})?( to \d{4}-\d{2}(-\d{2})?)?,\s*/i, '');
+const span = f => f.since && f.until ? `${fmtDate(f.since)} – ${fmtDate(f.until)}` : f.since ? `since ${fmtDate(f.since)}` : f.until ? `until ${fmtDate(f.until)}` : '';
+function factRow(f, extra = false) {
+  return `<div class="fact${extra ? ' extra' : ''}${f.status === 'disputed' ? ' disputed' : ''}">
+    <div>${esc(factText(f.fact))}</div>
+    <div class="meta">${span(f) ? `<span>${esc(span(f))}</span>` : ''}
+      <span title="Separate conversations that say this">${f.conversations} conversation${f.conversations === 1 ? '' : 's'}</span>
+      ${f.status === 'disputed' ? '<span class="tag">sources disagree</span>' : ''}
+      ${f.source ? `<button class="link" data-session="${esc(f.source)}">source</button>` : ''}</div>
+  </div>`;
 }
 
 function themeHtml(t, also = []) {

@@ -47,6 +47,12 @@ How to work:
   you read the full context and the replies.
 - Use run_sql for anything countable: who he talks to most, message counts, when something started or
   stopped, activity over time. Never estimate numbers from search results.
+- Memory: recall holds consolidated facts with dates (current vs past) and support. For anything about the current
+  state or history of Sarthak or a person (studies, work, where they live, relationships, possessions, health,
+  plans, what changed), call recall first. When recall returns current facts supported by 3+ conversations that
+  answer the question, ANSWER FROM THEM and cite their [n]: do not search again just to re-confirm. Search or read
+  further only when the facts are missing, disputed, rest on 1-2 conversations, or the question asks for details,
+  quotes or a specific episode. Interpret freely when asked (patterns, how things changed), marked as such.
 - For questions about a relationship or a person in general, start with person_overview, then read a few of
   the example conversations it gives for the themes you mention. Its numbers are exact; cite them as [sql].
 - Use topic_timeline for "when" questions about a topic; then read the example excerpts it returns.
@@ -74,13 +80,26 @@ How to answer:
 - Pronouns: use a person's pronouns only if a note or the chats clearly state them; otherwise use "they".
 - Cite individual numbers like [3] or [3][5]; never ranges. Never show internal ids (person_id, account_id,
   session_id, chunk/msg ids, P_/A_/T_ node ids) in the answer.
-- Privacy: never repeat phone numbers, email addresses, street addresses, passwords, OTPs, bank/card/ID numbers, order/tracking numbers
-  or similar personal identifiers — even Sarthak's own — unless he explicitly asks for that exact detail.
-  This includes apartment/building, street and locality names: say "your address" instead.
-  Say "your address" / "an email" instead.
+- Personal details: this is Sarthak's own archive and he is the only user. Phone numbers, addresses, emails and
+  other identifiers are fine to give when they answer the question; don't pad answers with them otherwise.
 - Be concise: a short direct answer first, then supporting details. Markdown is fine."""
 
 TOOLS = [
+    {"type": "function", "function": {
+        "name": "recall",
+        "description": "Sarthak's MEMORY: consolidated, dated facts about him, a person, or a place/organisation/"
+                       "project (where someone studies, works, lives; relationships; possessions; health; plans; what "
+                       "changed and when). Each fact has since/until dates, status (current/past/disputed), how many "
+                       "conversations support it, and a numbered source to cite. Fast: use it FIRST for questions "
+                       "about anyone's current state, history or relationships, then read sources only when a fact is "
+                       "disputed, weakly supported (1 conversation) or the question needs the details.",
+        "parameters": {"type": "object", "properties": {
+            "about": {"type": "string", "description": "'me' for Sarthak, a person's name / P_<id> / A_<id>, or a "
+                                                       "place/organisation/project name; omit to search all facts"},
+            "query": {"type": "string", "description": "what you want to know, to rank the facts (e.g. 'college', "
+                                                       "'where does he live', 'laptop')"},
+            "include_past": {"type": "boolean", "description": "also return facts that are no longer true (history)"},
+        }}}},
     {"type": "function", "function": {
         "name": "search_memory",
         "description": "Hybrid semantic + keyword search over chat excerpts. Returns numbered excerpts with date, "
@@ -520,6 +539,9 @@ def describe(name, args, res):
         return f"🔎 Searching “{args.get('query', '')}”{who}", nodes
     if name == "read_conversation":
         return f"📖 Reading: {res.get('where', 'a conversation')}", res.get("nodes", [])
+    if name == "recall":
+        about = args.get("about") or "everything"
+        return f"🧠 Recalling what I know about {'you' if about.lower() in ('me', 'sarthak', 'myself') else about}", []
     if name == "person_overview":
         return f"👤 Looking at your history with {args.get('person', '…')}", []
     if name == "topic_timeline":
@@ -708,6 +730,70 @@ class Agent:
                 "summary": summ, "messages": text, "note": note,
                 "previous_session": s.get("previous_session"), "next_session": s.get("next_session")}
 
+    def _recall(self, sources, about=None, query=None, include_past=False, k=25):
+        """Facts from the memory layer (scripts/index/build_facts.py), most relevant first, each citable."""
+        import numpy as np
+        c = self.sql.conn
+        with self.sql.lock:
+            if not c.execute("SELECT 1 FROM main.sqlite_master WHERE name = 'Facts'").fetchone():
+                return {"error": "memory not built yet (scripts/index/build_facts.py); use search_memory"}
+        about_l = (about or "").strip().lower()
+        if about_l in ("me", "i", "myself", "sarthak", "sarthak sidhant", "you"):
+            where, args, label = "e.kind = 'self'", (), "you"
+        elif about:
+            pid, aids = None, []
+            try:
+                sc = self.backend.resolve(about)
+                pid = sc["id"] if sc["kind"] == "person" else None
+                aids = sc.get("account_ids") or []
+                label = sc.get("name") or about
+            except Exception:
+                label = about
+            q = "e.name LIKE ? OR e.aliases LIKE ?"
+            args = [f"%{about}%", f"%{about}%"]
+            if pid:
+                q += " OR e.person_id = ?"
+                args.append(pid)
+            if aids:
+                q += f" OR e.account_id IN ({','.join('?' * len(aids))})"
+                args += aids
+            where, args = f"({q})", tuple(args)
+        else:
+            where, args, label = "1", (), "everything"
+        with self.sql.lock:
+            rows = c.execute(f"""
+                SELECT f.fact_id, e.name, e.kind, f.category, f.statement, f.valid_from, f.valid_to, f.status,
+                       f.confidence, f.sources, v.v
+                FROM main.Facts f JOIN main.Entities e USING(entity_id)
+                LEFT JOIN main.FactVectors v USING(fact_id)
+                WHERE {where} {'' if include_past else "AND f.status != 'past'"}""", args).fetchall()
+        if not rows:
+            return {"about": label, "facts": [], "note": "nothing in memory; try search_memory"}
+        if query and any(r[10] for r in rows):
+            try:
+                qv = np.asarray(self.backend.encode(query), dtype=np.float32)
+                score = [float(np.frombuffer(r[10], dtype=np.float16).astype(np.float32) @ qv) if r[10] else -1
+                         for r in rows]
+            except Exception:
+                words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2]
+                score = [sum(w in r[4].lower() for w in words) for r in rows]
+            order = sorted(range(len(rows)), key=lambda i: (-score[i], -(rows[i][8] or 0)))
+        else:
+            order = sorted(range(len(rows)), key=lambda i: (rows[i][7] == "past", -(rows[i][8] or 0)))
+        out = []
+        for i in order[:k]:
+            fid, ename, kind, cat, st, vf, vt, status, conf, srcs, _ = rows[i]
+            n = None
+            for sid in json.loads(srcs or "[]")[:1]:
+                try:
+                    sess = self.backend.session(sid)
+                    n = self._register(sources, ("session", sid), {"kind": "conversation", **sess})
+                except Exception:
+                    pass
+            out.append({"n": n, "about": ename if kind != "self" else "Sarthak", "category": cat, "fact": st,
+                        "since": vf, "until": vt, "status": status, "conversations": conf})
+        return {"about": label, "facts": out, "more": max(0, len(rows) - k)}
+
     def _overview(self, sources, person):
         try:
             sc = self.backend.resolve(str(person))          # person (all accounts) or one account
@@ -844,6 +930,8 @@ class Agent:
             res = {"forgotten": [n["text"] for n in found]} if found else {"forgotten": [], "note": "no matching notes"}
         elif name == "list_notes":
             res = {"notes": [{k: n[k] for k in ("subject", "text", "saved")} for n in self.notes.search(args.get("about"))]}
+        elif name == "recall":
+            res = self._recall(sources, args.get("about"), args.get("query"), bool(args.get("include_past")))
         elif name == "find_person":
             res = {"candidates": self.backend.person(args.get("name", ""))[:8]}
         elif name == "run_sql":

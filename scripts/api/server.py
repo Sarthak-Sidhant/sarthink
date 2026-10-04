@@ -332,6 +332,9 @@ class _Backend:
     def session(self, session_id):
         return session(session_id)
 
+    def encode(self, q):
+        return S.encode_query(q)          # query vector (memory facts are embedded with the same model)
+
     def person(self, name):
         return person(name)["candidates"]
 
@@ -587,6 +590,36 @@ def people_get(pid: int):
                     seen.add(s_["account_id"])
                     sugg.append(s_)
     return {**p, "suggestions": sugg}
+
+
+@app.get("/api/facts")
+@locked
+def facts(ref: str = "me", past: bool = True):
+    """The memory layer for one person (P_<id>), account (A_<id>) or you ('me'): consolidated facts with since/until,
+    status and support, each with the conversation it rests on (scripts/index/build_facts.py)."""
+    if not S.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'Facts'").fetchone():
+        return {"facts": [], "built": False}
+    if ref in ("me", "P_1", f"P_{ME}"):
+        where, args = "e.kind = 'self'", ()
+    elif ref.startswith("P_") and ref[2:].isdigit():
+        names, members, _ = people_index()
+        aids = members.get(int(ref[2:]), [])
+        where = f"(e.person_id = ? OR e.account_id IN ({','.join('?' * len(aids)) or 'NULL'}))"
+        args = (int(ref[2:]), *aids)
+    elif ref.startswith("A_") and ref[2:].isdigit():
+        _, _, person_of = people_index()
+        aid = int(ref[2:])
+        where, args = "(e.account_id = ? OR e.person_id = ?)", (aid, person_of.get(aid, -1))
+    else:
+        raise HTTPException(400, "ref must be me, P_<id> or A_<id>")
+    rows = S.conn.execute(f"""
+        SELECT f.category, f.statement, f.valid_from, f.valid_to, f.status, f.confidence, f.sources
+        FROM Facts f JOIN Entities e USING(entity_id)
+        WHERE {where} {'' if past else "AND f.status != 'past'"}
+        ORDER BY f.status = 'past', f.confidence DESC""", args).fetchall()
+    return {"built": True, "facts": [{"category": c, "fact": st, "since": vf, "until": vt, "status": stt,
+                                      "conversations": n, "source": (json.loads(src or "[]") or [None])[0]}
+                                     for c, st, vf, vt, stt, n, src in rows]}
 
 
 @app.get("/api/people/{pid}/dossier")

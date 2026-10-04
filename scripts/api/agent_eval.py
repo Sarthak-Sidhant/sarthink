@@ -42,11 +42,12 @@ CASES = [
     (10, "lookup", "What happened with my physics test in August 2025?",
      ["wrote on the question paper instead of the answer sheet", "did badly"], False),
     (11, "stats", "How many messages have I sent in total, and on which platform the most?",
-     ["about 148,370 messages", "Twitter the most (~49k)"], False),
+     ["about 320,000 messages", "WhatsApp the most (~145k)"], False),
     (12, "stats", "When did I first talk to Gareth and how much have we talked?",
      ["first on 19 Oct 2024", "about 8,600 messages in total"], False),
-    (13, "stats", "Which friend do I DM the most?", ["datavorous (among named people)"], False),
-    (14, "stats", "Which year was I most active?", ["2025"], False),
+    (13, "stats", "Which friend do I DM the most?",
+     ["Devanshi by far (~105k messages from her in 1:1 chats)", "Mihir Karbelkar next among friends"], False),
+    (14, "stats", "Which year was I most active?", ["2026"], False),
     (15, "abstain", "When did I go skydiving?", [], True),
     (16, "abstain", "What did I plan for our wedding anniversary?", [], True),
     (17, "abstain", "What happened on my Japan trip?", [], True),
@@ -69,7 +70,7 @@ HARD = [
     (24, "cross", "On which platforms did I talk about FIITJEE, and what did I say?",
      ["Reddit (the most)", "Twitter", "Instagram", "Discord", "lost ~1.5 lakh / FIR / refund"], False),
     (25, "compare", "Do I talk more with Gareth or datavorous?",
-     ["datavorous more", "roughly 13-15k messages with datavorous (depending on counting DMs only or all shared chats) vs ~8.6k with Gareth"], False),
+     ["datavorous more", "roughly 20k messages in chats with datavorous (across his accounts) vs ~8.6k with Gareth"], False),
     (26, "multihop", "Who warned me that the Zimaboard deal might be a scam?", ["FireRoz"], False),
     (27, "multihop", "The kid I interviewed for a moderator role — how long did we keep talking after that?",
      ["quazarblaster", "from May 2025 until about Aug 2025", "roughly 470 messages"], False),
@@ -81,15 +82,18 @@ HARD = [
 
 TEMPORAL = [
     (31, "when", "When did I first talk to datavorous?", ["24 Dec 2024"], False),
-    (32, "timeofday", "What time of day am I usually most active?", ["around 9 PM IST", "evenings/late night (8-11 PM)"], False),
+    (32, "timeofday", "What time of day am I usually most active?", ["late evening to midnight IST (9 PM - 12 AM, peak around 11 PM)"], False),
     (33, "timeofday", "Do Gareth and I chat late at night?",
      ["yes", "roughly 30% of messages between midnight and 5 AM IST"], False),
     (34, "window", "Who did I talk to the most in March 2025?",
-     ["Lux or anubis among named people (~750 messages each)"], False),
+     ["Aparajita (~2,000 messages)", "then Lux and anubis (~750 each)"], False),
     (35, "window", "Which month of 2025 was I most active on Instagram?", ["March 2025"], False),
-    (36, "when", "When did I stop talking to Harsh, and how long did we chat?",
-     ["last messages around 8 Nov 2025", "started around Aug 2025", "about 2,200 messages"], False),
-    (37, "relative", "What was I up to last month?", [], True),   # archive ends 24 Jan 2026; today is later
+    (36, "when", "When did I start talking to Harsh (Harsh_vardhan_2511), and are we still in touch?",
+     ["started around Apr 2025 (Discord)", "still talking as of late Sep / early Oct 2026",
+      "across WhatsApp, Discord and Instagram, roughly 10k messages from him"], False),
+    (37, "relative", "What was I up to last month?",       # asked in early Oct 2026: September 2026
+     ["talks about September 2026", "Devanshi is the person you talked to most", "Devanshi proposed on 28 Sep 2026",
+      "describes at least two other real, dated things from Sep 2026"], False),
     (38, "when", "When did I lose my Mettle bottle?", ["in August 2024 (lost around early Aug; posted about it on 13 Aug 2024)"], False),
     (39, "order", "Which came first: the Zimaboard purchase or my X99 server build?",
      ["Zimaboard first (Sep 2024)", "X99 build later (Nov-Dec 2024)"], False),
@@ -159,7 +163,11 @@ def main(a):
     if v2_file.exists():
         v2 = [(c["id"], c["type"], c["question"], c["facts"], c["abstain"]) for c in json.loads(v2_file.read_text())]
         SESSION_OF.update({c["id"]: c["session_id"] for c in json.loads(v2_file.read_text()) if c.get("session_id")})
-    pool = {"basic": CASES, "hard": HARD, "temporal": TEMPORAL, "v2": v2,
+    memory = []          # Phase 0 memory eval: questions as asked in a normal week (gen_memory_eval.py, hand-reviewed)
+    if (OUT / "memory_v1.json").exists():
+        memory = [(c["id"], c["type"], c["question"], c["facts"], c["abstain"])
+                  for c in json.loads((OUT / "memory_v1.json").read_text())]
+    pool = {"basic": CASES, "hard": HARD, "temporal": TEMPORAL, "v2": v2, "memory": memory,
             "all": CASES + HARD + TEMPORAL + v2}[a.set]
     cases = [c for c in pool if not a.only or c[0] in {int(x) for x in a.only.split(",")}]
     OUT.mkdir(parents=True, exist_ok=True)
@@ -233,6 +241,6 @@ if __name__ == "__main__":
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--model", default="deepseek-v4-pro", help="answering model")
     ap.add_argument("--no-thinking", action="store_true", help="answer without the model's thinking phase")
-    ap.add_argument("--set", choices=["basic", "hard", "temporal", "v2", "all"], default="basic")
+    ap.add_argument("--set", choices=["basic", "hard", "temporal", "v2", "memory", "all"], default="basic")
     ap.add_argument("--multi", action="store_true", help="enable the planner / multi-agent 'deep research' path")
     main(ap.parse_args())

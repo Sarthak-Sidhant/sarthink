@@ -12,6 +12,7 @@ Stages (each is safe to rerun; --from starts at one):
               are priced at DeepSeek's list price and projected; the rest runs only if the projection is within
               --budget (or you confirm). --offpeak waits for DeepSeek's half-price hours
   embeddings  8B vectors for chunks without one, on OpenRouter (~$0.01 per million tokens)
+  facts       memory: lasting facts from the new summaries, consolidated per person/thing (DeepSeek, cents)
   inbox       promises/plans from the new summaries, then triage: current items the chat already settled
               (done, passed, trivial) move to "Auto-cleared" (DeepSeek, cents)
   graph       graph files re-exported; existing nodes keep their positions, new ones sit by their chats
@@ -33,7 +34,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts" / "index"))
 from common import DATA_DIR, INDEX_DB, PROFILE_CACHE, SRC_DB, USER_DB  # noqa: E402
 
-STAGES = ["parse", "index", "summaries", "embeddings", "inbox", "graph"]
+STAGES = ["parse", "index", "summaries", "embeddings", "facts", "inbox", "graph"]
 SAMPLE = 100          # sessions summarized first to measure the real cost
 STATE = DATA_DIR / "logs" / "update_state.json"     # what the parse stage saw, for the report after a resume
 
@@ -253,6 +254,10 @@ def stage_embeddings(a):
         run("scripts/index/merge_embeddings.py", out)
 
 
+def stage_facts(a):
+    run("scripts/index/build_facts.py", "all")   # new conversations only; re-consolidates the people they touch
+
+
 def stage_inbox(a):
     run("scripts/index/build_commitments.py", "--tag", a.tag)
     run("scripts/index/triage_inbox.py")       # settle current items against the chat (DeepSeek, cents)
@@ -298,6 +303,8 @@ def main():
                 break
         elif st == "embeddings":
             stage_embeddings(a)
+        elif st == "facts":
+            stage_facts(a)
         elif st == "inbox":
             stage_inbox(a)
         elif st == "graph":
