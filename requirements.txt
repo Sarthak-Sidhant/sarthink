@@ -2,6 +2,7 @@
 fastapi>=0.110
 uvicorn>=0.29
 pydantic>=2.6
+python-multipart>=0.0.9  # login form (scripts/api/auth.py)
 numpy>=1.26
 httpx>=0.27
 python-dotenv>=1.0

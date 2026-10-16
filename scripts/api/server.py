@@ -43,11 +43,13 @@ from search import Searcher  # noqa: E402
 from agent import Agent  # noqa: E402
 from people import ME, PeopleStore  # noqa: E402
 from themes import subject as theme_subject  # noqa: E402
+import auth  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 SUMMARY_MODEL, SUMMARY_VERSION = "deepseek-flash", "v3"
 
 app = FastAPI(title="Sarthink")
+AUTH_ON = auth.install(app)   # PIN + password login when credentials are configured (hosted use)
 S: Searcher = None
 NAMES = {}          # account_id -> account name
 ACCOUNTS = {}       # account_id -> {key, platform, is_me, placeholder, messages}
@@ -1030,7 +1032,8 @@ if __name__ == "__main__":
     from common import IDENTITY_MAP
     PEOPLE = PeopleStore(USER_DB, json.load(open(IDENTITY_MAP)).get("master_persona", "Me"))
     PEOPLE.import_merges(DATA_DIR / "person_merges.json")      # a hand-written list, imported once
-    print(f"Data: {DATA_DIR} | {len(S.ids)} chunks | encoder: {S.encoder_url or 'local ' + a.model + ' model'}")
+    print(f"Data: {DATA_DIR} | {len(S.ids)} chunks | encoder: {S.encoder_url or 'local ' + a.model + ' model'}"
+          f" | login: {'PIN + password' if AUTH_ON else 'off'}")
 
     def _warm():          # dossiers take ~30-40s to build (yours spans the whole archive): have them ready, not on
         _inbox_facts()                                                  # first click (cached after); inbox ~8s cold
