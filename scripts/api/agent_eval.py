@@ -10,14 +10,15 @@ Usage: python3 scripts/api/agent_eval.py [--api http://127.0.0.1:8002] [--only 1
 import argparse
 import concurrent.futures as cf
 import json
+import sys
 import time
 import urllib.request
 from pathlib import Path
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts" / "index"))
+import llm  # noqa: E402
 OUT = REPO / "processed_data" / "eval" / "agent"
 
 # (id, type, question, expected key facts, should_abstain)
@@ -157,7 +158,7 @@ def judge(client, case, res, api):
 
 
 def main(a):
-    client = OpenAI(api_key=dotenv_values(REPO / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    client = llm.client()
     v2 = []
     v2_file = OUT / "cases_v2.json"
     if v2_file.exists():

@@ -11,7 +11,6 @@ must cite [n]; the API returns only the cited sources, each with message ids and
 the viewer can highlight them.
 """
 import concurrent.futures as cf
-import os
 import datetime as dt
 import json
 import re
@@ -20,10 +19,9 @@ import threading
 import time
 from types import SimpleNamespace
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
-from common import INDEX_DB, REPO_ROOT, SRC_DB, USER_DB
+import llm
+from common import INDEX_DB, SRC_DB, USER_DB
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 MAX_STEPS = 10
@@ -628,9 +626,8 @@ class Agent:
     {kind, id, node, name, scope, account_ids}; payloads are the API's JSON shapes."""
 
     def __init__(self, backend, model="deepseek-v4-pro", thinking=True, verify=False, verify_model="deepseek-flash"):
-        key = dotenv_values(REPO_ROOT / ".env").get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
         # without a key the agent answers with a hint; stats/search/inbox elsewhere keep working
-        self.client = OpenAI(api_key=key, base_url="https://api.deepseek.com", timeout=300) if key else None
+        self.client = llm.client(timeout=300)
         self.backend = backend
         self.model = model
         self.thinking = thinking
@@ -1102,7 +1099,7 @@ class Agent:
         t_start = time.time()
         if not self.client:
             return {"question": question, "mode": "disabled", "plan": {}, "draft": None, "verifier_changes": [],
-                    "answer": "The memory assistant needs a DeepSeek API key: add `DEEPSEEK_API_KEY=...` to `.env` "
+                    "answer": "The memory assistant needs an API key: add `OPENROUTER_API_KEY=...` (or `DEEPSEEK_API_KEY=...`) to `.env` "
                               "and restart. Meanwhile you can explore the graph, click people for their dossier, "
                               "and use the 📥 Inbox and 📅 On this day buttons.",
                     "sources": [], "invalid_citations": [], "steps": [], "model": None, "thinking": None,

@@ -12,12 +12,13 @@ import datetime as dt
 import json
 import random
 import sqlite3
+import sys
 from pathlib import Path
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts" / "index"))
+import llm  # noqa: E402
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 ME = "Aarav"
 
@@ -151,7 +152,7 @@ def main(a):
                                content TEXT, parent_msg_id TEXT);
         CREATE INDEX idx_timestamp ON Messages(timestamp_utc); CREATE INDEX idx_thread ON Messages(thread_id);
         CREATE INDEX idx_author ON Messages(author_id); CREATE INDEX idx_parent ON Messages(parent_msg_id);""")
-    client = OpenAI(api_key=dotenv_values(REPO / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    client = llm.client()
     rng = random.Random(42)
 
     def user(platform, name):

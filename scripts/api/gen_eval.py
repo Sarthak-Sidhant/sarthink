@@ -14,13 +14,12 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts" / "index"))
 sys.path.insert(0, str(REPO / "scripts" / "api"))
 from agent import SqlTool  # noqa: E402
+import llm  # noqa: E402
 from common import connect_index  # noqa: E402
 
 OUT = REPO / "processed_data" / "eval" / "agent" / "cases_v2.json"
@@ -138,7 +137,7 @@ def abstains():
 
 def main(a):
     rng = random.Random(a.seed)
-    client = OpenAI(api_key=dotenv_values(REPO / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    client = llm.client()
     cases = lookups(a, rng, client) + stats(rng) + abstains()
     for i, c in enumerate(cases):
         c["id"] = 101 + i

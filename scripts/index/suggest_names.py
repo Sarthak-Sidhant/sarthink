@@ -9,11 +9,10 @@ import json
 import random
 import re
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
 from build_identity import placeholder_name
-from common import REPO_ROOT, connect_index
+import llm
+from common import connect_index
 
 PROMPT = """These are messages from one private chat between Sarthak and another person, "THEM", whose account was
 later deleted, so their name is lost. Does the chat reveal THEM's real first name (or the name Sarthak calls them)?
@@ -39,7 +38,7 @@ def verified(name, msgs, them, me_users):
 
 
 def main(a):
-    client = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    client = llm.client()
     conn = connect_index()
     rows = conn.execute("""
         SELECT at.user_id, at.thread_id, ac.message_count FROM AccountThreads at

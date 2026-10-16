@@ -15,10 +15,9 @@ import json
 import random
 from pathlib import Path
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
-from common import DATA_DIR, REPO_ROOT, connect_index
+import llm
+from common import DATA_DIR, connect_index
 
 CHECK = """You are auditing a personal memory system. Below is a FACT it holds about {name}, and the actual messages
 of the conversations it claims to rest on (oldest first; "Sarthak Sidhant (me)" is the owner).
@@ -68,8 +67,7 @@ def evidence(api, fact, person_id, account_id, k=5, since=None):
 
 def main(a):
     conn = connect_index()
-    cl = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com",
-                timeout=600)
+    cl = llm.client(timeout=600)
     people = conn.execute("""SELECT e.entity_id, e.name, e.person_id, e.account_id FROM Entities e JOIN Facts f USING(entity_id)
                              WHERE e.kind IN ('person', 'self') GROUP BY e.entity_id ORDER BY COUNT(*) DESC LIMIT 12""").fetchall()
     rnd = random.Random(a.seed)

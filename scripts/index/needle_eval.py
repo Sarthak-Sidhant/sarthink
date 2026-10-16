@@ -15,9 +15,8 @@ import json
 import random
 from collections import defaultdict
 
-from dotenv import dotenv_values
-from openai import AsyncOpenAI
 
+import llm
 from common import REPO_ROOT, connect_index
 
 EVAL_DIR = REPO_ROOT / "processed_data" / "eval"
@@ -34,8 +33,7 @@ Return JSON: {"query": "..."}"""
 
 
 async def gen(a):
-    env = dotenv_values(REPO_ROOT / ".env")
-    client = AsyncOpenAI(api_key=env["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com", timeout=120)
+    client = llm.client(asynchronous=True, timeout=120)
     conn = connect_index()
     rows = conn.execute("""SELECT chunk_id, platform, header, text FROM Chunks
                            WHERE index_policy='embed' AND token_count >= 60""").fetchall()

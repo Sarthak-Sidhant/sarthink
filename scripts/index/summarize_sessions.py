@@ -7,7 +7,7 @@ and chunk text itself is untouched. Chunk contexts are prepended to chunks at em
 - The tail of the previous session and head of the next session in the same conversation are
   passed as read-only context, so the summary can note continuity without absorbing their facts.
 - Resumable: sessions already summarized with the same model + prompt version are skipped.
-- Provider-agnostic (any OpenAI-compatible endpoint); defaults to DeepSeek.
+- Provider-agnostic (any OpenAI-compatible endpoint via --base-url); defaults to llm.py (OpenRouter, else DeepSeek).
 
 Usage:
   python3 scripts/index/summarize_sessions.py --limit 20 --sample            # pilot
@@ -24,6 +24,7 @@ import time
 from dotenv import dotenv_values
 from openai import AsyncOpenAI
 
+import llm
 from common import REPO_ROOT, connect_index
 
 PROMPT_VERSION = "v3"  # v2: thinking off; v3: context-derived details must be marked
@@ -153,8 +154,8 @@ async def summarize_one(client, model, sess_id, prompt, chunk_ids, sem, thinking
 
 
 async def run(a):
-    env = load_env()
-    client = AsyncOpenAI(api_key=env.get(a.api_key_env), base_url=a.base_url, timeout=180)
+    client = (AsyncOpenAI(api_key=load_env().get(a.api_key_env), base_url=a.base_url, timeout=180) if a.base_url
+              else llm.client(asynchronous=True, timeout=180))
     conn = connect_index()
     setup(conn)
 
@@ -202,9 +203,9 @@ async def run(a):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base-url", default="https://api.deepseek.com")
+    ap.add_argument("--base-url", help="another OpenAI-compatible endpoint (default: llm.py's provider)")
     ap.add_argument("--model", default="deepseek-flash")
-    ap.add_argument("--api-key-env", default="DEEPSEEK_API_KEY")
+    ap.add_argument("--api-key-env", default="DEEPSEEK_API_KEY", help="key for --base-url")
     ap.add_argument("--min-tokens", type=int, default=100)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--sample", action="store_true", help="random sample instead of chronological order")

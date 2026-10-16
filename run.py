@@ -6,7 +6,7 @@ backed by the search + memory-assistant API on :8000 (which still serves the cla
   python3 run.py                        your own archive in processed_data/ (needs the index built)
   python3 run.py --gpu HOST PORT        use a remote GPU embed_server over a self-healing SSH tunnel
 
-Without DEEPSEEK_API_KEY in .env the graph, search, stats, inbox and "on this day" still work.
+Without OPENROUTER_API_KEY (or DEEPSEEK_API_KEY) in .env the graph, search, stats, inbox and "on this day" still work.
 """
 import argparse
 import os
@@ -54,8 +54,8 @@ def main():
 
     try:
         from dotenv import dotenv_values
-        if not (dotenv_values(ROOT / ".env").get("DEEPSEEK_API_KEY") or env.get("DEEPSEEK_API_KEY")):
-            print("Note: no DEEPSEEK_API_KEY in .env — the assistant is disabled; graph, search and stats still work.")
+        if not any(dotenv_values(ROOT / ".env").get(k) or env.get(k) for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY")):
+            print("Note: no OPENROUTER_API_KEY or DEEPSEEK_API_KEY in .env — the assistant is disabled; graph, search and stats still work.")
     except ImportError:
         sys.exit("Missing dependencies: pip install -r requirements.txt")
 

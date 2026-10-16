@@ -23,10 +23,9 @@ import datetime as dt
 import json
 import sqlite3
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
-from common import REPO_ROOT, USER_DB, connect_index
+import llm
+from common import USER_DB, connect_index
 
 MODEL = "deepseek-flash"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
@@ -169,7 +168,7 @@ def classify_areas(conn, client):
 
 
 def main(a):
-    client = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    client = llm.client()
     conn = connect_index()
     classify_areas(conn, client)
     if a.areas_only:

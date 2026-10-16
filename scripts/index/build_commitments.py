@@ -16,10 +16,9 @@ import datetime as dt
 import hashlib
 import json
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
-from common import REPO_ROOT, connect_index
+import llm
+from common import connect_index
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 BATCH = 40
@@ -43,7 +42,7 @@ CREATE TABLE Commitments (
 
 
 def main(tag=None):
-    client = OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    client = llm.client()
     conn = connect_index()
     names = {r[0]: r[1] for r in conn.execute("SELECT account_id, name FROM Accounts")}
     mine = {r[0] for r in conn.execute("SELECT account_id FROM Accounts WHERE is_me = 1")}

@@ -15,11 +15,10 @@ import json
 import sys
 from pathlib import Path
 
-from dotenv import dotenv_values
-from openai import OpenAI
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts" / "index"))
+import llm  # noqa: E402
 from common import connect_index  # noqa: E402
 
 OUT = REPO / "processed_data" / "eval" / "agent" / "memory_v1.json"
@@ -138,8 +137,7 @@ def last_contact(conn, as_of):
 
 
 def main(a):
-    key = dotenv_values(REPO / ".env")["DEEPSEEK_API_KEY"]
-    client = OpenAI(api_key=key, base_url="https://api.deepseek.com", timeout=600)
+    client = llm.client(timeout=600)
     conn = connect_index()
 
     facts_of = {name: fact_rows(conn, name) for name, _, _ in PACKS}     # reads stay on this thread

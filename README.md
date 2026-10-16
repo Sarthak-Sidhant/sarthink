@@ -16,13 +16,13 @@ can run everything without anyone's real data.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # optional: add DEEPSEEK_API_KEY to enable the assistant
+cp .env.example .env          # optional: add OPENROUTER_API_KEY to enable the assistant
 python3 run.py --demo         # then open http://127.0.0.1:8080
 ```
 
 - Python 3.10+. The first start downloads a small embedding model (~1.2 GB, Qwen3-Embedding-0.6B) and runs it
   on CPU. Plug your laptop in — on battery, CPU search can take several seconds per query.
-- **Without** a DeepSeek key you still get the graph, semantic search, person dossiers (stats + themes),
+- **Without** an OpenRouter (or DeepSeek) key you still get the graph, semantic search, person dossiers (stats + themes),
   the commitments inbox and "on this day". The key enables the chat assistant and day reviews (a typical
   answer costs about half a US cent).
 
@@ -90,7 +90,7 @@ flowchart LR
   highlighting).
 - **Search** fuses Qwen3-Embedding vectors with keyword search (reciprocal-rank fusion). With your own data we
   use the 8B model on a rented GPU via a stateless embedding service; the demo uses 0.6B on CPU.
-- **Agent**: DeepSeek (reasoning mode) with tools; answers are post-processed (citation mapping, redaction)
+- **Agent**: DeepSeek (reasoning mode, via OpenRouter or DeepSeek's API) with tools; answers are post-processed (citation mapping, redaction)
   and optionally fact-checked against every source it read.
 
 ## How well it works

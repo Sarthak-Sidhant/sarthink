@@ -29,8 +29,8 @@ import random
 import re
 
 from dotenv import dotenv_values
-from openai import OpenAI
 
+import llm
 from common import REPO_ROOT, connect_index
 
 MODEL = "deepseek-flash"
@@ -84,8 +84,7 @@ Return JSON: {{"facts": [{{"c": 0, "subject": "...", "kind": "...", "category": 
 {conversations}"""
 
 def client():
-    return OpenAI(api_key=dotenv_values(REPO_ROOT / ".env")["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com",
-                  timeout=600)
+    return llm.client(timeout=600)
 
 
 def ask(cl, prompt, thinking=False, max_tokens=8000):
