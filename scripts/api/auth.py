@@ -179,6 +179,10 @@ def install(app):
                      samesite="lax")
         return r
 
+    @app.get("/api/auth/check")
+    def auth_check():              # behind the login: the web app's server asks this before serving its pages
+        return {"ok": True}
+
     @app.get("/logout")
     def logout():
         r = RedirectResponse("/login", status_code=303)

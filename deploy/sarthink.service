@@ -1,0 +1,22 @@
+# Sarthink on a server: the web app on 127.0.0.1:8711 (put the tunnel/proxy in front of this one) and its API on
+# 127.0.0.1:8710. Both stay on localhost; the PIN + password login (scripts/api/auth.py) covers every page and API
+# call except /login and /api/health, and with SARTHINK_REQUIRE_AUTH=1 it refuses to start without credentials.
+#   sudo cp deploy/sarthink.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now sarthink
+[Unit]
+Description=Sarthink (web app + search/memory API, behind the s1d.me login)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sarthak
+WorkingDirectory=/home/sarthak/projects/sarthink
+Environment=PYTHONUNBUFFERED=1
+Environment=SARTHINK_REQUIRE_AUTH=1
+Environment=S1D_AUTH_FILE=/etc/s1d/auth.env
+ExecStart=/home/sarthak/projects/sarthink/.venv/bin/python run.py --port 8710 --web-port 8711
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

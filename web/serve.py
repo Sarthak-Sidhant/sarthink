@@ -13,10 +13,11 @@ import mimetypes
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 WEB = Path(__file__).resolve().parent
 PROXY_PREFIXES = ("/api/", "/processed_data/")
+LOGIN_PATHS = ("/login", "/logout")       # the backend's sign-in pages (only when it has a login configured)
 HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization",
        "proxy-authenticate", "host", "content-length"}
 mimetypes.add_type("text/javascript", ".js")
@@ -29,14 +30,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/"):
             sys.stderr.write(f"{self.command} {self.path[:120]} {args[1] if len(args) > 1 else ''}\n")
 
+    def _to_backend(self):
+        return self.path.startswith(PROXY_PREFIXES) or urlsplit(self.path).path in LOGIN_PATHS
+
     def do_GET(self):
-        self._proxy() if self.path.startswith(PROXY_PREFIXES) else self._static()
+        self._proxy() if self._to_backend() else self._static()
 
     def do_HEAD(self):
         self.do_GET()
 
     def do_POST(self):
-        self._proxy() if self.path.startswith(PROXY_PREFIXES) else self.send_error(405)
+        self._proxy() if self._to_backend() else self.send_error(405)
 
     def do_DELETE(self):          # people: remove an account from a person, remove a person
         self._proxy() if self.path.startswith(PROXY_PREFIXES) else self.send_error(405)
@@ -46,6 +50,12 @@ class Handler(BaseHTTPRequestHandler):
         f = (WEB / rel).resolve()
         if WEB not in f.parents or not f.is_file() or f.suffix == ".py":
             f = WEB / "index.html"                  # single-page app: unknown paths get the shell
+        if f.suffix == ".html" and self._needs_login():
+            self.send_response(303)
+            self.send_header("Location", "/login?next=" + quote(self.path, safe=""))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = f.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", mimetypes.guess_type(f.name)[0] or "application/octet-stream")
@@ -54,6 +64,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def _needs_login(self):
+        """True when the backend has a login and this browser isn't signed in (its pages need it too)."""
+        u = urlsplit(self.api)
+        conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=10)
+        try:
+            conn.request("GET", "/api/auth/check", headers={"Cookie": self.headers.get("Cookie", "")})
+            return conn.getresponse().status == 401
+        except OSError:
+            return False                            # backend down: the page loads and shows the API error
+        finally:
+            conn.close()
 
     def _proxy(self):
         u = urlsplit(self.api)
